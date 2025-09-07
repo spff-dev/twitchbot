@@ -1,4 +1,4 @@
-# SpiffyOS – Twitch Chat Bot
+# SpiffyOS - Twitch Chat Bot
 
 A self-hosted Twitch bot for the `spiffgg` channel. Built on Node.js with IRC (tmi.js) plus EventSub WebSocket for subs/bits/follows/ads, with auto-refreshing OAuth tokens, timed announcements, and hot-reloadable commands.
 

@@ -1,5 +1,5 @@
 // Simulate an ad starting now for N seconds by posting the same announcements.
-// Mod/broadcaster only, to avoid spam. Usage: !test_ads [seconds]  (default 30, 5–180 clamp)
+// Mod/broadcaster only, to avoid spam. Usage: !test_ads [seconds]  (default 30, 5-180 clamp)
 function isBroadcaster(tags) { const b = tags.badges || {}; return b && b.broadcaster === '1'; }
 function isMod(tags) { return !!tags.mod || isBroadcaster(tags); }
 

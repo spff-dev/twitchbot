@@ -29,7 +29,7 @@ module.exports = {
     const sleeps = daysBetween(y, m, d, targetYear, 12, 25);
 
     const msg = sleeps === 0
-      ? '0 sleeps — it’s Christmas! 🎄'
+      ? '0 sleeps - it’s Christmas! 🎄'
       : `${sleeps} sleep${sleeps === 1 ? '' : 's'} until Christmas 🎄`;
 
     return ctx.say(msg);

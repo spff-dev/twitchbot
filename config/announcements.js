@@ -5,7 +5,7 @@
  * - initialDelayMin?: delay before the FIRST post (minutes). Defaults to everyMin.
  * - jitterSec?: add 0..jitterSec random seconds to each post time (to desync from other bots).
  * - type?: 'chat' | 'announcement'  (default 'chat')
- * - liveOnly?: boolean  (default true) – if true, skip when the channel is offline
+ * - liveOnly?: boolean  (default true) - if true, skip when the channel is offline
  */
 module.exports = [
   {

@@ -29,9 +29,9 @@
   // Announcement templates
   "templates": {
     "shoutout": "Please go and give {USER} a follow {GAMEFRAG}https://twitch.tv/{LOGIN}",
-    "bits":  "⭐ {USER} just cheered {BITS} bits — thank you!",
-    "sub":   "💜 {USER} just subscribed ({TIER}) — thank you!",
-    "resub": "💜 {USER} resubscribed ({TIER}) — {MONTHS} months!",
+    "bits":  "⭐ {USER} just cheered {BITS} bits - thank you!",
+    "sub":   "💜 {USER} just subscribed ({TIER}) - thank you!",
+    "resub": "💜 {USER} resubscribed ({TIER}) - {MONTHS} months!",
     "gift":  "🎁 {ANON}{GIFTER} gifted {COUNT} {TIER} sub{S}!"
   },
 

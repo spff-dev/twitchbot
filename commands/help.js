@@ -57,7 +57,7 @@ module.exports = {
       if (!m) return reply(`no command named "${args[0]}"`);
       const aliasStr = m.aliases && m.aliases.length ? ` (aliases: ${m.aliases.join(', ')})` : '';
       const desc = m.description || 'no description';
-      return say(`${prefix}${m.name}${aliasStr} — ${desc} [perm: ${m.permission}]`);
+      return say(`${prefix}${m.name}${aliasStr} - ${desc} [perm: ${m.permission}]`);
     }
 
     const names = metas.map(m => `${prefix}${m.name}`);
@@ -70,7 +70,7 @@ module.exports = {
     }
     const remaining = names.length - shown.length;
     if (remaining > 0) out += ` … (+${remaining} more)`;
-    out += ` — try "${prefix}help <command>"`;
+    out += ` - try "${prefix}help <command>"`;
     return say(out);
   }
 };

@@ -119,7 +119,7 @@ function loadOverrides() {
 // Greeting config (hot-reloaded by rebuildCommands)
 const DEFAULT_GREETING = {
   enabled: true,
-  message: "SpiffyOS online ✅ — type !help for commands.",
+  message: "SpiffyOS online ✅ - type !help for commands.",
   delayMs: 1500,
   minIntervalSec: 900
 };
