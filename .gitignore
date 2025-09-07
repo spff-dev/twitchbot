@@ -1,2 +1,22 @@
+# Node
 node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Environment (NEVER commit)
 .env
+.env.*
+!/.env.example
+
+# Logs & artifacts
+*.log
+logs/
+pids/
+*.pid
+coverage/
+dist/
+tmp/
+
+# OS/editor noise
+.DS_Store
+*.swp
