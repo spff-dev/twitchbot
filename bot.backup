@@ -3,6 +3,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const tmi = require('tmi.js');
+const WebSocket = require('ws'); // used inside eventsub
 const { startEventSubBot, startEventSubBroadcaster } = require('./lib/eventsub');
 const buildHandlers = require('./events/handlers');
 
@@ -13,7 +14,7 @@ const {
   TWITCH_CLIENT_ID,
   TWITCH_CLIENT_SECRET,
   TWITCH_REFRESH_TOKEN,
-  BROADCASTER_REFRESH_TOKEN, // needed for subs/bits/ad EventSub + schedule polling
+  BROADCASTER_REFRESH_TOKEN,
   CMD_PREFIX = '!'
 } = process.env;
 
@@ -21,11 +22,8 @@ if (!BOT_USERNAME || !CHANNELS || !TWITCH_CLIENT_ID || !TWITCH_CLIENT_SECRET || 
   console.error("Missing required env vars. Need BOT_USERNAME, CHANNELS, TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, TWITCH_REFRESH_TOKEN.");
   process.exit(1);
 }
-if (!BROADCASTER_REFRESH_TOKEN) {
-  console.warn("[WARN] BROADCASTER_REFRESH_TOKEN is not set; subs/bits/ad EventSub and schedule warnings will fail. You can add it later.");
-}
 
-// ---- Auth: bot access token (user token) auto-refresh ----
+// ---- Auth: bot token (auto-refresh) ----
 let tokenState = { accessToken: null, expiresAt: 0, refreshTimer: null };
 
 async function refreshAccessToken(reason = "scheduled") {
@@ -48,18 +46,12 @@ async function refreshAccessToken(reason = "scheduled") {
   }
 
   const data = await res.json();
-
-  if (data.refresh_token && data.refresh_token !== TWITCH_REFRESH_TOKEN) {
-    console.warn("[AUTH] Twitch rotated your refresh_token. Update your .env to keep future restarts healthy.");
-    console.warn("[AUTH] New refresh_token:", data.refresh_token);
-  }
-
   const now = Date.now();
   const expiresInMs = (data.expires_in || 3600) * 1000;
   tokenState.accessToken = data.access_token;
   tokenState.expiresAt = now + expiresInMs;
 
-  const skew = Math.min(5 * 60 * 1000, Math.floor(expiresInMs * 0.1)); // 5m or 10%
+  const skew = Math.min(5 * 60 * 1000, Math.floor(expiresInMs * 0.1));
   const refreshIn = Math.max(60 * 1000, expiresInMs - skew);
   if (tokenState.refreshTimer) clearTimeout(tokenState.refreshTimer);
   tokenState.refreshTimer = setTimeout(() => {
@@ -71,7 +63,7 @@ async function refreshAccessToken(reason = "scheduled") {
 }
 function tokenWillExpireSoon() { return Date.now() > (tokenState.expiresAt - 60 * 1000); }
 
-// ---- Auth: broadcaster access token (mint on demand from refresh) ----
+// ---- Auth: broadcaster access token (mint on demand) ----
 let bState = { accessToken: null, expiresAt: 0 };
 async function getBroadcasterAccessToken() {
   if (!BROADCASTER_REFRESH_TOKEN) throw new Error('Missing BROADCASTER_REFRESH_TOKEN in .env');
@@ -99,15 +91,15 @@ async function getBroadcasterAccessToken() {
   return bState.accessToken;
 }
 
-// ---- Config (JSONC) + Commands with overrides ----
+// ---- JSONC config for command overrides/greeting ----
 const CMD_DIR = path.join(__dirname, 'commands');
 const CONFIG_PATH = path.join(__dirname, 'config', 'commands.json');
 
 function readJsonC(file) {
   let raw = fs.readFileSync(file, 'utf8');
-  raw = raw.replace(/\/\*[\s\S]*?\*\//g, '');      // /* block comments */
-  raw = raw.replace(/(^|\s)\/\/.*$/gm, '');        // // line comments
-  raw = raw.replace(/,(\s*[}\]])/g, '$1');         // trailing commas
+  raw = raw.replace(/\/\*[\s\S]*?\*\//g, '');
+  raw = raw.replace(/(^|\s)\/\/.*$/gm, '');
+  raw = raw.replace(/,(\s*[}\]])/g, '$1');
   return JSON.parse(raw);
 }
 
@@ -124,10 +116,10 @@ function loadOverrides() {
   }
 }
 
-// Greeting config (hot-reloaded with !reload)
+// Greeting config (hot-reloaded by rebuildCommands)
 const DEFAULT_GREETING = {
   enabled: true,
-  message: "SpiffyOS online ✅ - type !help for commands.",
+  message: "I am online ✅",
   delayMs: 1500,
   minIntervalSec: 900
 };
@@ -154,7 +146,7 @@ function applyOverride(mod, ov) {
 
 function loadCommands(dir, overrides) {
   const commands = new Map();
-  const triggers = new Map(); // trigger -> command.name
+  const triggers = new Map();
   if (!fs.existsSync(dir)) {
     console.warn(`[CMD] Directory missing: ${dir}`);
     return { commands, triggers };
@@ -183,7 +175,6 @@ function loadCommands(dir, overrides) {
   return { commands, triggers };
 }
 
-// Hot-reload helpers used by !reload
 let commands = new Map();
 let triggers = new Map();
 function clearCommandCache() {
@@ -200,11 +191,10 @@ function rebuildCommands() {
   return { count: commands.size };
 }
 
-// ---- Greeting runtime (per-channel guard) ----
-const lastGreetAt = new Map();   // channel -> epoch ms
-const pendingGreet = new Set();  // channels mid-delay
-
-function maybeGreet(client, channel, reason = 'join') {
+// ---- Greeting runtime ----
+const lastGreetAt = new Map();
+const pendingGreet = new Set();
+function maybeGreet(client, channel) {
   if (!greetCfg.enabled) return;
   const key = channel.toLowerCase();
   const now = Date.now();
@@ -216,31 +206,179 @@ function maybeGreet(client, channel, reason = 'join') {
   pendingGreet.add(key);
   const delay = Math.max(0, Number(greetCfg.delayMs) || 0);
   setTimeout(async () => {
-    try {
-      await client.say(channel, String(greetCfg.message || DEFAULT_GREETING.message));
-      lastGreetAt.set(key, Date.now());
-    } finally {
-      pendingGreet.delete(key);
-    }
+    try { await client.say(channel, String(greetCfg.message || DEFAULT_GREETING.message)); }
+    finally { lastGreetAt.set(key, Date.now()); pendingGreet.delete(key); }
   }, delay);
 }
 
-// ---- Main bot ----
+// ---- Threaded reply helper via Helix ----
+const HELIX_API = 'https://api.twitch.tv/helix';
+async function sendThreadedReply({ token, clientId, channel, parentId, message }) {
+  const login = channel.replace(/^#/, '').toLowerCase();
+
+  const meRes = await fetch(`${HELIX_API}/users`, {
+    headers: { Authorization: `Bearer ${token}`, 'Client-Id': clientId }
+  });
+  const me = await meRes.json().catch(() => ({}));
+  const sender_id = me?.data?.[0]?.id;
+
+  const uRes = await fetch(`${HELIX_API}/users?login=${encodeURIComponent(login)}`, {
+    headers: { Authorization: `Bearer ${token}`, 'Client-Id': clientId }
+  });
+  const u = await uRes.json().catch(() => ({}));
+  const broadcaster_id = u?.data?.[0]?.id;
+
+  const res = await fetch(`${HELIX_API}/chat/messages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Client-Id': clientId,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      broadcaster_id,
+      sender_id,
+      message,
+      reply_parent_message_id: parentId
+    })
+  });
+  if (res.status !== 200) throw new Error(`send reply status ${res.status}`);
+}
+
+// ---- Announcement banner helper (bot token) ----
+const idCache = { me: null, byLogin: new Map() };
+async function postAnnouncementBanner({ message, channelLogin }) {
+  const token = tokenState.accessToken;
+  const clientId = TWITCH_CLIENT_ID;
+
+  if (!idCache.me) {
+    const r = await fetch(`${HELIX_API}/users`, {
+      headers: { Authorization: `Bearer ${token}`, 'Client-Id': clientId }
+    }).then(r => r.json()).catch(() => ({}));
+    idCache.me = r?.data?.[0]?.id || null;
+  }
+  const key = String(channelLogin).toLowerCase();
+  if (!idCache.byLogin.has(key)) {
+    const r = await fetch(`${HELIX_API}/users?login=${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${token}`, 'Client-Id': clientId }
+    }).then(r => r.json()).catch(() => ({}));
+    const id = r?.data?.[0]?.id || null;
+    idCache.byLogin.set(key, id);
+  }
+  const moderator_id = idCache.me;
+  const broadcaster_id = idCache.byLogin.get(key);
+  if (!moderator_id || !broadcaster_id) return;
+
+  await fetch(`${HELIX_API}/chat/announcements?broadcaster_id=${broadcaster_id}&moderator_id=${moderator_id}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Client-Id': clientId,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ message, color: 'primary' })
+  }).catch(() => {});
+}
+
+// ---- Timed announcements scheduler ----
+const ANN_PATH = path.join(__dirname, 'config', 'announcements.js');
+let annTimers = [];
+
+function loadAnnouncementsConfig() {
+  try {
+    delete require.cache[ANN_PATH];
+    const items = require(ANN_PATH);
+    if (!Array.isArray(items)) return [];
+    return items.map(it => ({
+      text: String(it.text || '').trim(),
+      everyMin: Math.max(1, Number(it.everyMin || 0)),
+      initialDelayMin: it.initialDelayMin != null ? Math.max(0, Number(it.initialDelayMin)) : null,
+      jitterSec: Math.max(0, Number(it.jitterSec || 0)),
+      type: (it.type === 'announcement') ? 'announcement' : 'chat',
+      liveOnly: it.liveOnly == null ? true : !!it.liveOnly
+    })).filter(x => x.text && x.everyMin > 0);
+  } catch (e) {
+    console.warn(`[ANN] Failed to read ${ANN_PATH}: ${e.message}`);
+    return [];
+  }
+}
+
+async function isLive(login) {
+  if (!BROADCASTER_REFRESH_TOKEN) return false;
+  try {
+    const bTok = await getBroadcasterAccessToken();
+    const r = await fetch(`${HELIX_API}/streams?user_login=${encodeURIComponent(login)}`, {
+      headers: { Authorization: `Bearer ${bTok}`, 'Client-Id': TWITCH_CLIENT_ID }
+    });
+    if (!r.ok) return false;
+    const j = await r.json();
+    return Array.isArray(j?.data) && j.data.length > 0;
+  } catch { return false; }
+}
+
+function startAnnouncementTimers(client, channelLogins) {
+  stopAnnouncementTimers(); // clear any previous
+
+  const items = loadAnnouncementsConfig();
+  if (!items.length) { console.log('[ANN] No timed announcements configured.'); return; }
+
+  for (const login of channelLogins) {
+    const chan = `#${login}`;
+    for (const item of items) {
+      // decide the first delay
+      const baseDelayMs = (item.initialDelayMin != null ? item.initialDelayMin : item.everyMin) * 60_000;
+      const jitterMs = item.jitterSec ? Math.floor(Math.random() * (item.jitterSec * 1000)) : 0;
+      const firstDelay = baseDelayMs + jitterMs;
+      const periodMs = item.everyMin * 60_000;
+
+      const tick = async () => {
+        try {
+          if (!item.liveOnly || await isLive(login)) {
+            if (item.type === 'announcement') {
+              await postAnnouncementBanner({ message: item.text, channelLogin: login });
+            } else {
+              await client.say(chan, item.text);
+            }
+          }
+        } catch { /* keep quiet */ }
+        finally {
+          // schedule next
+          const j = item.jitterSec ? Math.floor(Math.random() * (item.jitterSec * 1000)) : 0;
+          const t = setTimeout(tick, periodMs + j);
+          annTimers.push(t);
+        }
+      };
+
+      const t = setTimeout(tick, Math.max(1000, firstDelay));
+      annTimers.push(t);
+    }
+  }
+
+  console.log(`[ANN] Timed announcements started for ${channelLogins.join(', ')} with ${items.length} item(s).`);
+}
+
+function stopAnnouncementTimers() {
+  for (const t of annTimers) clearTimeout(t);
+  annTimers = [];
+}
+
+// ---- Main ----
 let eventSubBotStarted = false;
 let eventSubBcStarted  = false;
 
 async function main() {
   await refreshAccessToken("startup");
-  const channels = CHANNELS.split(',').map(c => c.trim().toLowerCase()).filter(Boolean);
+  const channels = CHANNELS.split(',').map(c => c.trim().replace(/^#/, '').toLowerCase()).filter(Boolean);
+  const tmiChannels = channels.map(c => `#${c}`);
 
   const client = new tmi.Client({
     options: { debug: false },
     connection: { secure: true, reconnect: true },
     identity: { username: BOT_USERNAME, password: `oauth:${tokenState.accessToken}` },
-    channels
+    channels: tmiChannels
   });
 
-  // Patch refresh so future tokens update in-memory password for reconnects
+  // keep in-memory password fresh
   const originalRefresh = refreshAccessToken;
   refreshAccessToken = async (reason) => {
     const tok = await originalRefresh.call(null, reason);
@@ -250,13 +388,13 @@ async function main() {
   };
 
   client.on('connected', (addr, port) => {
-    console.log(`Connected to ${addr}:${port} as ${BOT_USERNAME}, joined ${channels.join(', ')}`);
-    for (const c of channels) maybeGreet(client, `#${c}`, 'connected');
+    console.log(`Connected to ${addr}:${port} as ${BOT_USERNAME}, joined ${tmiChannels.join(', ')}`);
+    for (const c of tmiChannels) maybeGreet(client, c);
 
-    const broadcasterLogin = (channels[0] || '').replace(/^#/, '').toLowerCase();
+    const broadcasterLogin = channels[0];
+
     const handlers = buildHandlers({ tmiClient: client, channel: `#${broadcasterLogin}` });
 
-    // BOT session: follows v2 (uses bot token)
     if (!eventSubBotStarted) {
       eventSubBotStarted = true;
       startEventSubBot({
@@ -270,13 +408,12 @@ async function main() {
       });
     }
 
-    // Broadcaster session: bits + subs + ad begin (uses broadcaster token)
-    if (!eventSubBcStarted) {
+    if (!eventSubBcStarted && BROADCASTER_REFRESH_TOKEN) {
       eventSubBcStarted = true;
       startEventSubBroadcaster({
         clientId: TWITCH_CLIENT_ID,
         getBroadcasterToken: () => getBroadcasterAccessToken(),
-        getBotToken: () => tokenState.accessToken, // announcements use bot token
+        getBotToken: () => tokenState.accessToken,
         broadcasterLogin,
         ...handlers
       }).catch(err => {
@@ -284,28 +421,22 @@ async function main() {
         eventSubBcStarted = false;
       });
     }
+
+    // Start timed announcements
+    startAnnouncementTimers(client, channels);
   });
 
-  client.on('disconnected', async (reason) => {
+  client.on('disconnected', (reason) => {
     console.warn('[NET] Disconnected:', reason);
+    stopAnnouncementTimers();
     if (tokenWillExpireSoon()) {
-      try {
-        await refreshAccessToken("pre-reconnect");
-        client.opts.identity.password = `oauth:${tokenState.accessToken}`;
-        console.log('[AUTH] Updated password before reconnect.');
-      } catch (err) {
-        console.error('[AUTH] pre-reconnect refresh failed:', err);
-      }
+      refreshAccessToken("pre-reconnect")
+        .then(tok => { client.opts.identity.password = `oauth:${tok}`; })
+        .catch(err => console.error('[AUTH] pre-reconnect refresh failed:', err));
     }
   });
 
-  client.on('join', (channel, username) => {
-    if ((username || '').toLowerCase() === BOT_USERNAME.toLowerCase()) {
-      maybeGreet(client, channel, 'join');
-    }
-  });
-
-  // Initial command + overrides load
+  // Initial command load
   rebuildCommands();
 
   client.on('message', async (channel, tags, message, self) => {
@@ -334,7 +465,6 @@ async function main() {
 
     if (!hasPermission((cmd.permission || 'everyone').toLowerCase(), tags)) return;
 
-    // cooldowns: Map<command, Map<userId, lastMs>>
     if (!global.__cooldowns) global.__cooldowns = new Map();
     const cooldowns = global.__cooldowns;
     function checkCooldown(name, uid, sec) {
@@ -344,8 +474,7 @@ async function main() {
       const last = bucket.get(uid) || 0;
       const delta = (now - last) / 1000;
       if (delta < sec) return { ok: false, wait: Math.ceil(sec - delta) };
-      bucket.set(uid, now);
-      cooldowns.set(name, bucket);
+      bucket.set(uid, now); cooldowns.set(name, bucket);
       return { ok: true };
     }
 
@@ -355,39 +484,16 @@ async function main() {
     const say = (text) => client.say(channel, text);
     const reply = (text) => client.say(channel, `@${user} ${text}`);
 
-    // Threaded reply helper via Helix, fallback to @mention if it fails
     const replyThread = async (text) => {
       const parentId = tags['id'];
-      const login = channel.replace(/^#/, '').toLowerCase();
       try {
-        // sender_id (bot)
-        const meRes = await fetch('https://api.twitch.tv/helix/users', {
-          headers: { Authorization: `Bearer ${tokenState.accessToken}`, 'Client-Id': TWITCH_CLIENT_ID }
+        await sendThreadedReply({
+          token: tokenState.accessToken,
+          clientId: TWITCH_CLIENT_ID,
+          channel,
+          parentId,
+          message: text
         });
-        const me = await meRes.json();
-        const sender_id = me?.data?.[0]?.id;
-
-        // broadcaster_id
-        const uRes = await fetch(`https://api.twitch.tv/helix/users?login=${encodeURIComponent(login)}`, {
-          headers: { Authorization: `Bearer ${tokenState.accessToken}`, 'Client-Id': TWITCH_CLIENT_ID }
-        });
-        const u = await uRes.json();
-        const broadcaster_id = u?.data?.[0]?.id;
-
-        const res = await fetch('https://api.twitch.tv/helix/chat/messages', {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${tokenState.accessToken}`,
-            'Client-Id': TWITCH_CLIENT_ID,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            broadcaster_id, sender_id,
-            message: text,
-            reply_parent_message_id: parentId
-          })
-        });
-        if (res.status !== 200) throw new Error(`send reply status ${res.status}`);
       } catch {
         await reply(text);
       }

@@ -37,7 +37,7 @@ module.exports = {
         headers: { 'Authorization': `Bearer ${bTok}`, 'Client-Id': clientId }
       })).json();
       const broadcaster_id = u?.data?.[0]?.id;
-      if (!broadcaster_id) return ctx.reply('cannot resolve channel');
+      if (!broadcaster_id) return ctx.replyThread('❌ Cannot resolve channel');
 
       const ch = await (await fetch(`https://api.twitch.tv/helix/channels?broadcaster_id=${broadcaster_id}`, {
         headers: { 'Authorization': `Bearer ${bTok}`, 'Client-Id': clientId }
@@ -51,21 +51,21 @@ module.exports = {
 
     // Fuzzy match via search/categories (pick top hit)
     const raw = ctx.args.join(' ').trim().replace(/^["']|["']$/g, '');
-    if (!raw) return ctx.reply('usage: !game "<category>"');
+    if (!raw) return ctx.replyThreaded('ℹ️ Usage: !game "<category>"');
 
     const bTok = await getBroadcasterAccessToken();
     const search = await (await fetch(`https://api.twitch.tv/helix/search/categories?query=${encodeURIComponent(raw)}&first=1`, {
       headers: { 'Authorization': `Bearer ${bTok}`, 'Client-Id': clientId }
     })).json();
     const hit = search?.data?.[0];
-    if (!hit) return ctx.reply(`no category found for "${raw}"`);
+    if (!hit) return ctx.replyThreaded(`❌ No category found for "${raw}"`);
 
     // Resolve broadcaster id
     const u = await (await fetch(`https://api.twitch.tv/helix/users?login=${encodeURIComponent(channelLogin)}`, {
       headers: { 'Authorization': `Bearer ${bTok}`, 'Client-Id': clientId }
     })).json();
     const broadcaster_id = u?.data?.[0]?.id;
-    if (!broadcaster_id) return ctx.reply('cannot resolve channel');
+    if (!broadcaster_id) return ctx.replyThreaded('❌ Cannot resolve channel');
 
     // PATCH channel info with new game_id
     const res = await fetch(`https://api.twitch.tv/helix/channels?broadcaster_id=${broadcaster_id}`, {
@@ -78,7 +78,7 @@ module.exports = {
       body: JSON.stringify({ game_id: hit.id })
     });
 
-    if (res.status !== 204) return ctx.reply(`category update failed (${res.status})`);
-    return ctx.say(`Category updated → ${hit.name}`);
+    if (res.status !== 204) return ctx.replyThreaded(`❌ Category update failed (${res.status})`);
+    return ctx.say(`✅ Category updated → ${hit.name}`);
   }
 };

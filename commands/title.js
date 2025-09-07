@@ -36,7 +36,7 @@ module.exports = {
       headers: { 'Authorization': `Bearer ${bTok}`, 'Client-Id': clientId }
     })).json();
     const broadcaster_id = u?.data?.[0]?.id;
-    if (!broadcaster_id) return ctx.reply('cannot resolve channel');
+    if (!broadcaster_id) return ctx.replyThreaded('❌ Cannot resolve channel');
 
     if (!wantsSet) {
       const ch = await (await fetch(`https://api.twitch.tv/helix/channels?broadcaster_id=${broadcaster_id}`, {
@@ -48,7 +48,7 @@ module.exports = {
 
     if (!isMod(ctx.tags)) return; // only mods + broadcaster may change
     const newTitle = ctx.args.join(' ').trim();
-    if (!newTitle) return ctx.reply('usage: !title New Stream Title');
+    if (!newTitle) return ctx.reply('ℹ️ Usage: !title New Stream Title');
 
     const res = await fetch(`https://api.twitch.tv/helix/channels?broadcaster_id=${broadcaster_id}`, {
       method: 'PATCH',
@@ -60,7 +60,7 @@ module.exports = {
       body: JSON.stringify({ title: newTitle })
     });
 
-    if (res.status !== 204) return ctx.reply(`title update failed (${res.status})`);
-    return ctx.say(`Title updated → ${newTitle}`);
+    if (res.status !== 204) return ctx.replyThread(`❌ Title update failed (${res.status})`);
+    return ctx.say(`✅ Title updated → ${newTitle}`);
   }
 };

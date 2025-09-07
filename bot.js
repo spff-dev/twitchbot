@@ -3,9 +3,10 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const tmi = require('tmi.js');
-const WebSocket = require('ws'); // used inside eventsub
+const WebSocket = require('ws'); // used by EventSub internals
 const { startEventSubBot, startEventSubBroadcaster } = require('./lib/eventsub');
 const buildHandlers = require('./events/handlers');
+const { reloadConfig: reloadCfgModule } = require('./lib/config');
 
 // ---- Env ----
 const {
@@ -19,14 +20,14 @@ const {
 } = process.env;
 
 if (!BOT_USERNAME || !CHANNELS || !TWITCH_CLIENT_ID || !TWITCH_CLIENT_SECRET || !TWITCH_REFRESH_TOKEN) {
-  console.error("Missing required env vars. Need BOT_USERNAME, CHANNELS, TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, TWITCH_REFRESH_TOKEN.");
+  console.error('Missing required env vars. Need BOT_USERNAME, CHANNELS, TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, TWITCH_REFRESH_TOKEN.');
   process.exit(1);
 }
 
-// ---- Auth: bot token (auto-refresh) ----
+// ---- Auth: bot token (auto refresh) ----
 let tokenState = { accessToken: null, expiresAt: 0, refreshTimer: null };
 
-async function refreshAccessToken(reason = "scheduled") {
+async function refreshAccessToken(reason = 'scheduled') {
   const params = new URLSearchParams({
     client_id: TWITCH_CLIENT_ID,
     client_secret: TWITCH_CLIENT_SECRET,
@@ -55,7 +56,7 @@ async function refreshAccessToken(reason = "scheduled") {
   const refreshIn = Math.max(60 * 1000, expiresInMs - skew);
   if (tokenState.refreshTimer) clearTimeout(tokenState.refreshTimer);
   tokenState.refreshTimer = setTimeout(() => {
-    refreshAccessToken("timer").catch(err => console.error("[AUTH] scheduled refresh error:", err));
+    refreshAccessToken('timer').catch(err => console.error('[AUTH] scheduled refresh error:', err));
   }, refreshIn);
 
   console.log(`[AUTH] ${reason} refresh ok. Next refresh in ~${Math.round(refreshIn/1000)}s, expires_in=${Math.round(expiresInMs/1000)}s`);
@@ -91,7 +92,7 @@ async function getBroadcasterAccessToken() {
   return bState.accessToken;
 }
 
-// ---- JSONC config for command overrides/greeting ----
+// ---- JSONC command overrides and greeting ----
 const CMD_DIR = path.join(__dirname, 'commands');
 const CONFIG_PATH = path.join(__dirname, 'config', 'commands.json');
 
@@ -116,10 +117,10 @@ function loadOverrides() {
   }
 }
 
-// Greeting config (hot-reloaded by rebuildCommands)
+// Greeting config
 const DEFAULT_GREETING = {
   enabled: true,
-  message: "SpiffyOS online ✅ - type !help for commands.",
+  message: 'SpiffyOS online - type !help for commands.',
   delayMs: 1500,
   minIntervalSec: 900
 };
@@ -160,8 +161,8 @@ function loadCommands(dir, overrides) {
       const mod = applyOverride(mod0, ov);
       if (mod.__disabled) { console.log(`[CMD] Disabled by config: ${mod.name}`); continue; }
       const perm = (mod.permission || 'everyone').toLowerCase();
-      if (!['everyone','mod','broadcaster'].includes(perm)) {
-        console.warn(`[CMD] ${mod.name}: invalid permission "${mod.permission}", defaulting to 'everyone'`);
+      if (!['everyone', 'mod', 'broadcaster'].includes(perm)) {
+        console.warn(`[CMD] ${mod.name}: invalid permission "${mod.permission}", defaulting to "everyone"`);
         mod.permission = 'everyone';
       }
       const aliasList = [mod.name, ...(mod.aliases || [])].map(s => s.toLowerCase());
@@ -317,7 +318,7 @@ async function isLive(login) {
 }
 
 function startAnnouncementTimers(client, channelLogins) {
-  stopAnnouncementTimers(); // clear any previous
+  stopAnnouncementTimers();
 
   const items = loadAnnouncementsConfig();
   if (!items.length) { console.log('[ANN] No timed announcements configured.'); return; }
@@ -325,7 +326,6 @@ function startAnnouncementTimers(client, channelLogins) {
   for (const login of channelLogins) {
     const chan = `#${login}`;
     for (const item of items) {
-      // decide the first delay
       const baseDelayMs = (item.initialDelayMin != null ? item.initialDelayMin : item.everyMin) * 60_000;
       const jitterMs = item.jitterSec ? Math.floor(Math.random() * (item.jitterSec * 1000)) : 0;
       const firstDelay = baseDelayMs + jitterMs;
@@ -340,9 +340,9 @@ function startAnnouncementTimers(client, channelLogins) {
               await client.say(chan, item.text);
             }
           }
-        } catch { /* keep quiet */ }
-        finally {
-          // schedule next
+        } catch {
+          // keep quiet
+        } finally {
           const j = item.jitterSec ? Math.floor(Math.random() * (item.jitterSec * 1000)) : 0;
           const t = setTimeout(tick, periodMs + j);
           annTimers.push(t);
@@ -362,12 +362,29 @@ function stopAnnouncementTimers() {
   annTimers = [];
 }
 
+// ---- Runtime config reload glue (used by !cfgreload) ----
+let currentClient = null;
+let currentChannels = [];
+
+async function reloadRuntimeConfig() {
+  // Reload template config and cheer guard
+  reloadCfgModule();
+  // Reload greeting overrides
+  loadGreeting();
+  // Restart timed announcements with any updated config
+  stopAnnouncementTimers();
+  if (currentClient && currentChannels.length) {
+    startAnnouncementTimers(currentClient, currentChannels);
+  }
+  console.log('[CFG] Runtime config reloaded.');
+}
+
 // ---- Main ----
 let eventSubBotStarted = false;
 let eventSubBcStarted  = false;
 
 async function main() {
-  await refreshAccessToken("startup");
+  await refreshAccessToken('startup');
   const channels = CHANNELS.split(',').map(c => c.trim().replace(/^#/, '').toLowerCase()).filter(Boolean);
   const tmiChannels = channels.map(c => `#${c}`);
 
@@ -390,6 +407,10 @@ async function main() {
   client.on('connected', (addr, port) => {
     console.log(`Connected to ${addr}:${port} as ${BOT_USERNAME}, joined ${tmiChannels.join(', ')}`);
     for (const c of tmiChannels) maybeGreet(client, c);
+
+    // store for timers reload
+    currentClient = client;
+    currentChannels = channels;
 
     const broadcasterLogin = channels[0];
 
@@ -430,7 +451,7 @@ async function main() {
     console.warn('[NET] Disconnected:', reason);
     stopAnnouncementTimers();
     if (tokenWillExpireSoon()) {
-      refreshAccessToken("pre-reconnect")
+      refreshAccessToken('pre-reconnect')
         .then(tok => { client.opts.identity.password = `oauth:${tok}`; })
         .catch(err => console.error('[AUTH] pre-reconnect refresh failed:', err));
     }
@@ -505,6 +526,7 @@ async function main() {
         say, reply, replyThread,
         prefix: CMD_PREFIX,
         reload: rebuildCommands,
+        reloadConfig: reloadRuntimeConfig,
         getToken: () => tokenState.accessToken
       });
     } catch (err) {

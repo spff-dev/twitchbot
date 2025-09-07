@@ -9,19 +9,13 @@
  */
 module.exports = [
   {
-    text: 'Enjoying the stream? Hit Follow to support 💜',
-    everyMin: 20,
-    jitterSec: 30
-  },
-  {
-    text: 'Use !clip to save a moment you liked!',
-    everyMin: 30,
-    jitterSec: 30
-  },
-  {
-    text: 'Join our Discord → https://discord.gg/YOURCODE',
+    text: 'Enjoying the stream? Hit Follow to support me! 💜',
     everyMin: 45,
-    jitterSec: 30,
-    type: 'announcement' // banner instead of chat
+    jitterSec: 60
+  },
+  {
+    text: 'Join my Discord → https://discord.gg/x65rDmMycn',
+    everyMin: 60,
+    jitterSec: 60
   }
 ];

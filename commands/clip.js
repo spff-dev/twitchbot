@@ -31,7 +31,7 @@ module.exports = {
     const now = Date.now();
     const left = COOLDOWN_MS - (now - lastRunAt);
     if (left > 0) {
-      return ctx.reply(`- !clip is on cooldown (${Math.ceil(left / 1000)}s)`);
+      return ctx.replyThread(`⏱️ !clip is on cooldown (${Math.ceil(left / 1000)}s)`);
     }
 
     const clientId = process.env.TWITCH_CLIENT_ID;
@@ -42,18 +42,18 @@ module.exports = {
     const uRes = await fetch(`https://api.twitch.tv/helix/users?login=${encodeURIComponent(login)}`, {
       headers: { Authorization: `Bearer ${bTok}`, 'Client-Id': clientId }
     });
-    if (!uRes.ok) return ctx.reply(`- can't clip right now (${uRes.status})`);
+    if (!uRes.ok) return ctx.replyThread(`❌ Can't clip right now (${uRes.status})`);
     const u = await uRes.json();
     const broadcaster_id = u?.data?.[0]?.id;
-    if (!broadcaster_id) return ctx.reply('- cannot resolve channel');
+    if (!broadcaster_id) return ctx.replyThread('❌ Cannot resolve channel');
 
     // Must be live
     const sRes = await fetch(`https://api.twitch.tv/helix/streams?user_id=${broadcaster_id}`, {
       headers: { Authorization: `Bearer ${bTok}`, 'Client-Id': clientId }
     });
-    if (!sRes.ok) return ctx.reply(`- can't read stream state (${sRes.status})`);
+    if (!sRes.ok) return ctx.replyThread(`❌ Can't read stream state (${sRes.status})`);
     const s = await sRes.json();
-    if (!s?.data?.[0]) { lastRunAt = now; return ctx.reply("- you can't clip while the channel is offline."); }
+    if (!s?.data?.[0]) { lastRunAt = now; return ctx.replyThread("❌ You can't clip while the channel is offline."); }
 
     // Create the clip
     const cRes = await fetch(`https://api.twitch.tv/helix/clips?broadcaster_id=${broadcaster_id}`, {
@@ -61,20 +61,20 @@ module.exports = {
       headers: { Authorization: `Bearer ${bTok}`, 'Client-Id': clientId }
     });
 
-    if (cRes.status === 429) return ctx.reply('- clip rate-limited; try again soon.');
+    if (cRes.status === 429) return ctx.replyThread('❌ Clip rate-limited; try again soon.');
     if (cRes.status !== 202) {
       const t = await cRes.text().catch(() => '');
-      return ctx.reply(`- sorry, clip failed (${cRes.status})`);
+      return ctx.replyThread(`❌ Sorry, clip failed (${cRes.status})`);
     }
 
     const c = await cRes.json().catch(() => null);
     const id = c?.data?.[0]?.id;
-    if (!id) return ctx.reply('- clip created, but no ID returned.');
+    if (!id) return ctx.replyThread('⚠️ Clip created, but no ID returned.');
 
     lastRunAt = now;
     // Give Twitch a tiny moment to make the clip page available
     await new Promise(r => setTimeout(r, 2000));
 
-    return ctx.reply(`Here's the clip -> https://clips.twitch.tv/${id}`);
+    return ctx.replyThread(`🎬 Here's your clip -> https://clips.twitch.tv/${id}`);
   }
 };
