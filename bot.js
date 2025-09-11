@@ -5,11 +5,11 @@
  *
  * Sources of truth (JSON only):
  *  - Commands:  config/bot-commands-config.json
- *  - General:   config/bot-general-config.json  (announcements, greeter)
+ *  - General:   config/bot-general-config.json  (announcements, greeter, templates)
  *
  * Modules (commands/*.js) provide logic + {defaults}; router always uses JSON.
- * Announcements now read from bot-general-config.json and honor onlineOnly by
- * checking Helix /streams on each tick (A-LIVE behavior).
+ * Announcements read from bot-general-config.json && honor onlineOnly by
+ * checking Helix /streams on each tick.
  */
 
 require('dotenv').config();
@@ -21,7 +21,6 @@ const { getAppToken } = require('./lib/apptoken');
 const { startEventSub } = require('./lib/eventsub');
 const { openDB } = require('./src/core/db');
 
-// ───────────────────────────────────────────────────────────────────────────────
 // env
 const CLIENT_ID = process.env.TWITCH_CLIENT_ID;
 const CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
@@ -45,7 +44,11 @@ if (!CHANNELS.length) {
 }
 console.log(`[BOOT] bot=${BOT_LOGIN} bc=${BROADCASTER_USER_ID} cmd=${CMD_PREFIX}`);
 
-// ───────────────────────────────────────────────────────────────────────────────
+// Pre-warm app token at boot so the first message does not mint lazily
+getAppToken()
+  .then(() => console.log('[AUTH] app token pre-warmed'))
+  .catch(e => console.error('[AUTH] pre-warm failed', e && e.message ? e.message : e));
+
 // DB (counts-only + command usage)
 const db = openDB();
 const STMT_INC_MSG = db.prepare(`
@@ -82,8 +85,7 @@ function logCommandUsage(ev, cmd, ok, reason) {
   }
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
-// Tokens (kept for other features)
+// Tokens
 let _bcToken = null, _bcExp = 0;
 let _botToken = null, _botExp = 0;
 async function getUserToken(kind) {
@@ -141,17 +143,15 @@ async function helix(pathname, opts) {
   return res;
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
-// JSON configs (single sources of truth)
+// JSON configs
 const CFG_CMDS = path.join(__dirname, 'config', 'bot-commands-config.json');
 const CFG_GEN  = path.join(__dirname, 'config', 'bot-general-config.json');
 
-// Ensure JSON exists
 function ensureFile(fp, seedObj) {
   try {
     if (!fs.existsSync(fp)) {
       fs.mkdirSync(path.dirname(fp), { recursive: true });
-      fs.writeFileSync(fp, JSON.stringify(seedObj, null, 2) + '\n', 'utf8');
+      fs.writeFileSync(fp, JSON.stringify(seedObj, null, 2) + '\\n', 'utf8');
       console.log('[CFG] created', path.basename(fp));
     }
   } catch (e) {
@@ -169,6 +169,13 @@ ensureFile(CFG_GEN, {
   },
   greeter: {
     bootGreeting: { enabled: false, message: 'I am online', delayMs: 1500, minIntervalSec: 900 }
+  },
+  templates: {
+    follow: 'Thanks for the follow, {user}!',
+    sub: 'Thanks for the sub, {user}!',
+    resub: 'Thanks for resubbing, {user}!',
+    subgift: '{user} gifted subs, thank you!',
+    bits: 'Thanks for the bits, {user}!'
   }
 });
 
@@ -177,21 +184,21 @@ function readJSON(fp) {
   catch (e) { console.error('[CFG] read failed', fp, e.message); return null; }
 }
 function writeJSON(fp, obj) {
-  try { fs.writeFileSync(fp, JSON.stringify(obj, null, 2) + '\n', 'utf8'); }
+  try { fs.writeFileSync(fp, JSON.stringify(obj, null, 2) + '\\n', 'utf8'); }
   catch (e) { console.error('[CFG] write failed', fp, e.message); }
 }
 
-// Commands config (authoritative)
 let commandsCfg = readJSON(CFG_CMDS) || { commands: {} };
+let generalCfg = readJSON(CFG_GEN) || {
+  announcements: { enabled: false, onlineOnly: true, intervalSeconds: 600, messages: [] },
+  greeter: { bootGreeting: { enabled: false, message: 'I am online', delayMs: 1500, minIntervalSec: 900 } },
+  templates: {}
+};
 
-// General config (announcements, greeter)
-let generalCfg = readJSON(CFG_GEN) || { announcements: { enabled: false, onlineOnly: true, intervalSeconds: 600, messages: [] }, greeter: { bootGreeting: { enabled: false, message: 'I am online', delayMs: 1500, minIntervalSec: 900 } } };
-
-// ───────────────────────────────────────────────────────────────────────────────
-// Command modules -> seed defaults into JSON (do not overwrite user values)
+// Commands: load modules && seed defaults into JSON
 const COMMANDS_DIR = path.join(__dirname, 'commands');
 let commands = new Map();
-let aliasMap = new Map(); // alias -> canonical
+let aliasMap = new Map();
 
 const DEFAULT_META = {
   aliases: [],
@@ -204,7 +211,6 @@ const DEFAULT_META = {
 };
 
 function loadCommandsAndSyncConfig() {
-  // Load command modules
   commands.clear();
   const files = fs.existsSync(COMMANDS_DIR) ? fs.readdirSync(COMMANDS_DIR).filter(f => f.endsWith('.js')) : [];
   for (const f of files) {
@@ -216,11 +222,9 @@ function loadCommandsAndSyncConfig() {
   }
   console.log(`[BOOT] commands loaded=${commands.size}`);
 
-  // Re-read commands config in case it was created fresh
   commandsCfg = readJSON(CFG_CMDS) || { commands: {} };
   if (!commandsCfg.commands) commandsCfg.commands = {};
 
-  // Merge defaults for missing keys
   const added = [];
   const completed = [];
   for (const [name, mod] of commands) {
@@ -242,7 +246,6 @@ function loadCommandsAndSyncConfig() {
     if (completed.length) console.log('[CFG] completed defaults for:', completed.join(', '));
   }
 
-  // Build alias map from config
   aliasMap.clear();
   for (const [name, meta] of Object.entries(commandsCfg.commands)) {
     aliasMap.set(name, name);
@@ -252,8 +255,7 @@ function loadCommandsAndSyncConfig() {
 }
 loadCommandsAndSyncConfig();
 
-// ───────────────────────────────────────────────────────────────────────────────
-// Rendering + policy helpers
+// Rendering && policy helpers
 function render(str, ev, vars = {}) {
   const base = {
     login: ev.userLogin || '',
@@ -265,7 +267,7 @@ function render(str, ev, vars = {}) {
   return String(str || '').replace(/\{([a-zA-Z0-9_]+)\}/g, (_, k) => (all[k] ?? ''));
 }
 
-// Cooldowns (GLOBAL per command)
+// Cooldowns (global per command)
 const cooldowns = new Map();
 function cmdCooldownLeft(cmd) {
   const now = Date.now();
@@ -301,7 +303,7 @@ async function sendChat(message, opts) {
     const txt = await res.text().catch(() => '');
     console.error('[SEND] failed', res.status, txt);
     if (res.status === 401) {
-      require('./lib/apptoken').invalidate(); // force refresh on next call
+      require('./lib/apptoken').invalidate();
     }
     return false;
   }
@@ -309,7 +311,7 @@ async function sendChat(message, opts) {
   return true;
 }
 
-// Base ctx passed to modules
+// Base ctx
 const ctxBase = {
   clientId: CLIENT_ID,
   getAppToken,
@@ -318,18 +320,17 @@ const ctxBase = {
   helix,
   say: (text) => sendChat(text),
   reply: (text, parent) => sendChat(text, { reply_parent_message_id: parent }),
-  commandsCfg: () => commandsCfg, // full JSON
+  commandsCfg: () => commandsCfg,
   reload: () => {
     commandsCfg = readJSON(CFG_CMDS) || { commands: {} };
     generalCfg = readJSON(CFG_GEN)  || generalCfg;
     loadCommandsAndSyncConfig();
-    reloadAnnouncements(); // pick up general changes
+    reloadAnnouncements();
     return true;
   }
 };
 
-// ───────────────────────────────────────────────────────────────────────────────
-// Router: JSON config is authoritative; modules compute vars only
+// Router
 async function handleCommand(ev) {
   const text = (ev.text || '').trim();
   if (!text.startsWith(CMD_PREFIX)) return false;
@@ -355,7 +356,6 @@ async function handleCommand(ev) {
   ctx.replyThread = (text, parent) => sendChat(text, { reply_parent_message_id: parent || ctx.replyParent });
   ctx.sayThread   = (text) => sendChat(text, { reply_parent_message_id: ctx.replyParent });
 
-  // Policy from JSON (strict defaults)
   const roles = (meta && Array.isArray(meta.roles)) ? meta.roles : ['everyone'];
   const cooldownSeconds = meta && Number(meta.cooldownSeconds || 0) || 0;
   const limitPerUser = meta && Number(meta.limitPerUser || 0) || 0;
@@ -369,7 +369,6 @@ async function handleCommand(ev) {
     return ctx.say(msg);
   };
 
-  // Permissions
   if (roles.includes('owner')) {
     if (!(ev.isBroadcaster || ev.isMod)) {
       logCommandUsage(ev, cmdName, 0, 'forbidden');
@@ -384,7 +383,6 @@ async function handleCommand(ev) {
     }
   }
 
-  // Global cooldown
   const cdLeft = cmdCooldownLeft(cmdName);
   if (cdLeft > 0) {
     logCommandUsage(ev, cmdName, 0, 'cooldown');
@@ -392,19 +390,17 @@ async function handleCommand(ev) {
     return true;
   }
 
-  // Per-user per-stream limit
   if (limitPerUser > 0) {
     const row = db.prepare(
       `SELECT COUNT(*) AS c FROM command_usage WHERE stream_id=0 AND user_id=? AND command=? AND ok=1`
     ).get(String(ev.userId || ''), cmdName);
     if ((row && row.c) >= limitPerUser) {
       logCommandUsage(ev, cmdName, 0, 'limit');
-      await feedback(`You've hit the usage limit for this stream.`);
+      await feedback(`You have hit the usage limit for this stream.`);
       return true;
     }
   }
 
-  // Execute module to compute variables (if present)
   let vars = {};
   let useReply = replyToUser;
   try {
@@ -422,7 +418,6 @@ async function handleCommand(ev) {
     return true;
   }
 
-  // Speak using JSON response only
   if (responseTpl) {
     const out = render(responseTpl, ev, vars);
     useReply ? await ctx.replyThread(out) : await ctx.say(out);
@@ -437,8 +432,7 @@ async function handleCommand(ev) {
   return true;
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
-// Announcements (from bot-general-config.json; A-LIVE by Helix check)
+// Announcements
 let announceTimer = null;
 let announceIdx = 0;
 
@@ -474,7 +468,7 @@ function startAnnouncements() {
     try {
       if (cfg.onlineOnly) {
         const live = await isChannelLive();
-        if (!live) return; // skip tick if not live
+        if (!live) return;
       }
       const msg = msgs[announceIdx % msgs.length];
       announceIdx++;
@@ -496,10 +490,11 @@ function reloadAnnouncements() {
   startAnnouncements();
 }
 
-// Kick announcements at boot
+// Kick announcements && greeting at boot
 startAnnouncements();
+scheduleGreeting();
 
-// Greeter (bootGreeting) from general config
+// Greeter from general config
 const GREET_STATE_FILE = path.join(__dirname, '.greeting_state.json');
 function scheduleGreeting() {
   const g = (generalCfg.greeter && generalCfg.greeter.bootGreeting) || {};
@@ -527,9 +522,7 @@ function scheduleGreeting() {
     }
   }, delayMs);
 }
-scheduleGreeting();
 
-// ───────────────────────────────────────────────────────────────────────────────
 // Intake server for forwarded EventSub chat
 const INTAKE_PORT = Number(process.env.INTAKE_PORT || 18082);
 const INTAKE_SECRET = process.env.WEBHOOK_SECRET || '';
@@ -568,10 +561,7 @@ function startIntake() {
 
         if (!ev.text) { res.statusCode = 204; return res.end(); }
 
-        // record counts-only metrics
         recordMessage(ev);
-
-        // route commands
         await handleCommand(ev);
 
         res.statusCode = 204; res.end();
@@ -588,7 +578,6 @@ function startIntake() {
 }
 const __intake = startIntake();
 
-// ───────────────────────────────────────────────────────────────────────────────
 // EventSub (subs/raids/follows; chat handled via webhook->intake)
 startEventSub({
   clientId: CLIENT_ID,
