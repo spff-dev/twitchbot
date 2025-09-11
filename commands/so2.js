@@ -1,139 +1,104 @@
-const API = 'https://api.twitch.tv/helix';
+'use strict';
 
-const idCache = new Map();
-let selfId = null;
+module.exports.name = 'so2';
+module.exports.aliases = ['soann', 'boost', 'so_announce'];
+module.exports.description = 'Post an announcement shoutout in chat';
+module.exports.permission = 'mod';
+module.exports.cooldownSec = 15;
 
-async function helix(path, token, clientId, opts = {}) {
-  const res = await fetch(`${API}${path}`, {
-    ...opts,
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Client-Id': clientId,
-      ...(opts.headers || {})
-    }
-  });
-  const text = await res.text();
-  let json = null;
-  try { json = text ? JSON.parse(text) : null; } catch { /* ignore */ }
-  return { res, json, text };
+function toLogin(raw) {
+  let s = String(raw || '').trim();
+  if (!s) return '';
+  s = s.replace(/^@+/, '');
+  const m = s.match(/twitch\.tv\/([^\/\s]+)/i);
+  if (m) s = m[1];
+  return s.toLowerCase();
 }
 
-async function getUserByLogin(login, token, clientId) {
-  const key = login.toLowerCase();
-  if (idCache.has(key)) return idCache.get(key);
-  const { res, json } = await helix(`/users?login=${encodeURIComponent(key)}`, token, clientId);
-  if (!res.ok) throw new Error(`unknown user: ${login}`);
-  const user = json?.data?.[0];
-  if (!user) throw new Error(`unknown user: ${login}`);
-  idCache.set(key, user);
-  return user; // { id, login, display_name }
+async function getJSON(res) {
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = body && body.message ? body.message : `status ${res.status}`;
+    throw new Error(msg);
+  }
+  return body;
 }
 
-async function getSelfId(token, clientId) {
-  if (selfId) return selfId;
-  const { res, json } = await helix(`/users`, token, clientId);
-  if (!res.ok) throw new Error(`self lookup failed: ${res.status}`);
-  selfId = json?.data?.[0]?.id;
-  if (!selfId) throw new Error('could not determine bot user id');
-  return selfId;
-}
+async function bestGame(ctx, userId, login) {
+  const tok = await ctx.getAppToken();
 
-// Best-effort game detector: live -> channel info -> last VOD -> search channels
-async function getBestGameForChannel(userId, login, token, clientId) {
-  // 1) If live, /streams has game_name
-  {
-    const r = await helix(`/streams?user_id=${userId}`, token, clientId);
-    const s = r.json?.data?.[0];
-    if (r.res.ok && s?.game_name) return { name: s.game_name, mode: 'currently' };
+  const s = await ctx.helix(`/streams?user_id=${userId}`, { method: 'GET', token: tok }).then(getJSON);
+  const live = s.data && s.data[0];
+  if (live && live.game_name) return { name: live.game_name, mode: 'currently' };
+
+  const c = await ctx.helix(`/channels?broadcaster_id=${userId}`, { method: 'GET', token: tok }).then(getJSON);
+  const ch = c.data && c.data[0];
+  if (ch && ch.game_name) return { name: ch.game_name, mode: 'last seen' };
+
+  const v = await ctx.helix(`/videos?user_id=${userId}&type=archive&first=1`, { method: 'GET', token: tok }).then(getJSON);
+  const gameId = v.data && v.data[0] && v.data[0].game_id;
+  if (gameId) {
+    const g = await ctx.helix(`/games?id=${encodeURIComponent(gameId)}`, { method: 'GET', token: tok }).then(getJSON);
+    const name = g.data && g.data[0] && g.data[0].name;
+    if (name) return { name, mode: 'from VOD' };
   }
 
-  // 2) Offline? /channels has game_name of "playing or last played"
-  {
-    const r = await helix(`/channels?broadcaster_id=${userId}`, token, clientId);
-    const c = r.json?.data?.[0];
-    if (r.res.ok && c?.game_name) return { name: c.game_name, mode: 'last seen' };
-  }
-
-  // 3) No channel category? Try last VOD’s game_id -> /games
-  {
-    const v = await helix(`/videos?user_id=${userId}&type=archive&first=1`, token, clientId);
-    const gameId = v.json?.data?.[0]?.game_id;
-    if (v.res.ok && gameId) {
-      const g = await helix(`/games?id=${encodeURIComponent(gameId)}`, token, clientId);
-      const name = g.json?.data?.[0]?.name;
-      if (g.res.ok && name) return { name, mode: 'from VOD' };
-    }
-  }
-
-  // 4) Ultimate fallback: /search/channels also includes “playing or last played”
-  {
-    const q = encodeURIComponent(login);
-    const r = await helix(`/search/channels?query=${q}&live_only=false`, token, clientId);
-    const match = r.json?.data?.find(d => (d.broadcaster_login || '').toLowerCase() === login.toLowerCase());
-    if (r.res.ok && match?.game_name) return { name: match.game_name, mode: 'search' };
-  }
+  const q = await ctx.helix(`/search/channels?query=${encodeURIComponent(login)}&live_only=false`, { method: 'GET', token: tok }).then(getJSON);
+  const match = (q.data || []).find(d => String(d.broadcaster_login || '').toLowerCase() === login.toLowerCase());
+  if (match && match.game_name) return { name: match.game_name, mode: 'search' };
 
   return null;
 }
 
-module.exports = {
-  name: 'so2',
-  aliases: ['soann', 'boost', 'so_announce'],
-  description: 'Post an announcement shoutout in chat',
-  permission: 'mod',
-  cooldownSec: 15, // separate, slightly longer cooldown
-  async run(ctx) {
-    const { channel, args, reply, say, getToken } = ctx;
-    if (!args.length) return reply('usage: !so_announce <user>');
+module.exports.run = async function so2(ctx, args) {
+  if (!(ctx.isMod || ctx.isBroadcaster)) return;
 
-    let target = args[0].trim()
-      .replace(/^@/, '')
-      .replace(/^https?:\/\/(www\.)?twitch\.tv\//i, '')
-      .replace(/[^a-zA-Z0-9_]/g, '');
-    if (!target) return reply('who am I announcing?');
+  const target = toLogin(args && args[0]);
+  if (!target) return ctx.reply('usage: !so2 <user>');
 
-    const token = getToken();
-    const clientId = process.env.TWITCH_CLIENT_ID;
-    const broadcasterLogin = channel.replace(/^#/, '').toLowerCase();
+  try {
+    // resolve target user with app token
+    const appTok = await ctx.getAppToken();
+    const ures = await ctx.helix(`/users?login=${encodeURIComponent(target)}`, { method: 'GET', token: appTok });
+    const ujson = await getJSON(ures);
+    const user = (ujson.data && ujson.data[0]) || null;
+    if (!user) return ctx.reply(`unknown user: ${target}`);
 
+    // build the same custom copy as !so
+    let gameFrag = '- they are very cool and deserve your support: ';
     try {
-      const broadcaster = await getUserByLogin(broadcasterLogin, token, clientId);
-      const moderatorId = await getSelfId(token, clientId);
-      const targetUser = await getUserByLogin(target, token, clientId);
-
-      // build message
-
-      let gameFrag = '- they are very cool and deserve your support: ';
-      try {
-        const g = await getBestGameForChannel(targetUser.id, targetUser.login, token, clientId);
-        if (g && g.name) {
+      const g = await bestGame(ctx, user.id, user.login);
+      if (g && g.name) {
+        const upper = String(g.name || '').toUpperCase();
         gameFrag = g.mode === 'currently'
-          ? `- they are currently streaming some ${(g.name ?? '').toUpperCase()}. They are very cool and deserve your support: `
-          : `- they were last seen streaming some ${(g.name ?? '').toUpperCase()}. They are very cool and deserve your support: `;
+          ? `- they are currently streaming some ${upper}. They are very cool and deserve your support: `
+          : `- they were last seen streaming some ${upper}. They are very cool and deserve your support: `;
       }
-    } catch { /* keep default */ }
+    } catch {}
 
-      const message =
-        `Please go and give the lovely ${targetUser.display_name} a follow ${gameFrag}https://twitch.tv/${targetUser.login}`;
+    const message = `Please go and give the lovely ${user.display_name} a follow ${gameFrag}https://twitch.tv/${user.login}`;
 
-      // POST /chat/announcements
-      const params = `?broadcaster_id=${broadcaster.id}&moderator_id=${moderatorId}`;
-      const body = JSON.stringify({ message, color: 'primary' });
-      const { res, text } = await helix(`/chat/announcements${params}`, token, clientId, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body
-      });
-
-      if (res.status === 204) return; // announcement posted; Twitch renders it
-      if (res.status === 403) return reply('bot needs announcements scope and mod status.');
-      if (res.status === 429) return reply('announcement rate-limited; try again soon.');
-
-      console.error('[SO_ANN] API error', res.status, text);
-      return reply('announcement failed.');
-    } catch (e) {
-      console.error('[SO_ANN] error', e);
-      return reply('announcement error.');
+    // Try to post an Announcement with the bot token and bot user id as moderator_id
+    try {
+      const botTok = await ctx.getBotToken();
+      const modId = String(process.env.BOT_USER_ID || '').trim();
+      if (modId) {
+        const q = `broadcaster_id=${ctx.channel.id}&moderator_id=${modId}`;
+        const res = await ctx.helix(`/chat/announcements?${q}`, {
+          method: 'POST',
+          token: botTok,
+          json: { message, color: 'primary' },
+        });
+        if (res.status === 204) return; // banner posted
+      }
+    } catch {
+      // fall through to normal message
     }
+
+    // Fallback: normal message so the command still does something useful
+    await ctx.say(message);
+  } catch (e) {
+    console.error('[SO2] error', e);
+    return ctx.reply('announcement error.');
   }
 };

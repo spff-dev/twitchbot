@@ -1,84 +1,59 @@
-// View/set the stream's category. Anyone can view; mods+broadcaster can set (fuzzy match).
-async function getBroadcasterAccessToken() {
-  const { TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, BROADCASTER_REFRESH_TOKEN } = process.env;
-  if (!BROADCASTER_REFRESH_TOKEN) throw new Error('Missing BROADCASTER_REFRESH_TOKEN');
-  const params = new URLSearchParams({
-    client_id: TWITCH_CLIENT_ID,
-    client_secret: TWITCH_CLIENT_SECRET,
-    grant_type: 'refresh_token',
-    refresh_token: BROADCASTER_REFRESH_TOKEN
-  });
-  const res = await fetch('https://id.twitch.tv/oauth2/token', {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString()
-  });
-  if (!res.ok) throw new Error(`broadcaster token error ${res.status}`);
-  const j = await res.json();
-  return j.access_token;
+'use strict';
+
+// Get or set stream game/category
+// No args: show current game
+// With args: search categories and set the first match
+
+module.exports.name = 'game';
+
+async function getJSON(res) {
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = body && body.message ? body.message : `status ${res.status}`;
+    throw new Error(msg);
+  }
+  return body;
 }
 
-function isBroadcaster(tags) { const b = tags.badges || {}; return b && b.broadcaster === '1'; }
-function isMod(tags) { return !!tags.mod || isBroadcaster(tags); }
+module.exports.run = async function game(ctx, args) {
+  try {
+    const bcId = ctx.channel.id;
 
-module.exports = {
-  name: 'game',
-  description: 'Show or set the stream category. Usage: !game | !game "<category>"',
-  permission: 'everyone',
-  cooldownSec: 0,
-  async run(ctx) {
-    const clientId = process.env.TWITCH_CLIENT_ID;
-    const channelLogin = ctx.channel.replace(/^#/, '').toLowerCase();
-    const wantsSet = ctx.args.length > 0;
-
-    // Read-only: show current category (use broadcaster token to avoid edge auth quirks)
-    if (!wantsSet) {
-      const bTok = await getBroadcasterAccessToken();
-      const u = await (await fetch(`https://api.twitch.tv/helix/users?login=${encodeURIComponent(channelLogin)}`, {
-        headers: { 'Authorization': `Bearer ${bTok}`, 'Client-Id': clientId }
-      })).json();
-      const broadcaster_id = u?.data?.[0]?.id;
-      if (!broadcaster_id) return ctx.replyThread('❌ Cannot resolve channel');
-
-      const ch = await (await fetch(`https://api.twitch.tv/helix/channels?broadcaster_id=${broadcaster_id}`, {
-        headers: { 'Authorization': `Bearer ${bTok}`, 'Client-Id': clientId }
-      })).json();
-      const name = ch?.data?.[0]?.game_name || 'Unknown';
-      return ctx.say(`Category: ${name}`);
+    if (!args || args.length === 0) {
+      const tok = await ctx.getAppToken();
+      const res = await ctx.helix(`/channels?broadcaster_id=${bcId}`, { method: 'GET', token: tok });
+      const js = await getJSON(res);
+      const row = js.data && js.data[0];
+      const g = row && row.game_name ? row.game_name : '(none)';
+      await ctx.reply(`Game: ${g}`);
+      return;
     }
 
-    // Set flow: only mods + broadcaster
-    if (!isMod(ctx.tags)) return; // silently ignore for non-mods
+    if (!(ctx.isMod || ctx.isBroadcaster)) {
+      return;
+    }
 
-    // Fuzzy match via search/categories (pick top hit)
-    const raw = ctx.args.join(' ').trim().replace(/^["']|["']$/g, '');
-    if (!raw) return ctx.replyThreaded('ℹ️ Usage: !game "<category>"');
+    const q = String(args.join(' ')).trim();
+    const tok = await ctx.getAppToken();
+    const sres = await ctx.helix(`/search/categories?query=${encodeURIComponent(q)}`, { method: 'GET', token: tok });
+    const sjs = await getJSON(sres);
+    const list = Array.isArray(sjs.data) ? sjs.data : [];
+    if (list.length === 0) {
+      await ctx.reply(`Game not found: ${q}`);
+      return;
+    }
+    // prefer case-insensitive exact match, else first
+    const exact = list.find(x => String(x.name || '').toLowerCase() === q.toLowerCase()) || list[0];
 
-    const bTok = await getBroadcasterAccessToken();
-    const search = await (await fetch(`https://api.twitch.tv/helix/search/categories?query=${encodeURIComponent(raw)}&first=1`, {
-      headers: { 'Authorization': `Bearer ${bTok}`, 'Client-Id': clientId }
-    })).json();
-    const hit = search?.data?.[0];
-    if (!hit) return ctx.replyThreaded(`❌ No category found for "${raw}"`);
-
-    // Resolve broadcaster id
-    const u = await (await fetch(`https://api.twitch.tv/helix/users?login=${encodeURIComponent(channelLogin)}`, {
-      headers: { 'Authorization': `Bearer ${bTok}`, 'Client-Id': clientId }
-    })).json();
-    const broadcaster_id = u?.data?.[0]?.id;
-    if (!broadcaster_id) return ctx.replyThreaded('❌ Cannot resolve channel');
-
-    // PATCH channel info with new game_id
-    const res = await fetch(`https://api.twitch.tv/helix/channels?broadcaster_id=${broadcaster_id}`, {
+    const bcTok = await ctx.getBroadcasterToken();
+    const pres = await ctx.helix(`/channels?broadcaster_id=${bcId}`, {
       method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${bTok}`,
-        'Client-Id': clientId,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ game_id: hit.id })
+      token: bcTok,
+      json: { game_id: exact.id },
     });
-
-    if (res.status !== 204) return ctx.replyThreaded(`❌ Category update failed (${res.status})`);
-    return ctx.say(`✅ Category updated → ${hit.name}`);
+    await getJSON(pres);
+    await ctx.reply(`Game updated to ${exact.name}.`);
+  } catch (e) {
+    await ctx.reply(`Game error: ${e.message}`);
   }
 };

@@ -1,5 +1,9 @@
+'use strict';
+
 const fs = require('fs');
 const path = require('path');
+
+module.exports.name = 'help';
 
 function readJsonC(file) {
   try {
@@ -13,64 +17,78 @@ function readJsonC(file) {
   }
 }
 
-function loadMeta(commandsDir, cfgPath) {
-  const files = fs.readdirSync(commandsDir).filter(f => f.endsWith('.js'));
-  const metas = [];
-  let overrides = {};
-  try { overrides = readJsonC(cfgPath).commands || {}; } catch { overrides = {}; }
+function loadMetas() {
+  const dir = path.join(__dirname);
+  const cfg = readJsonC(path.join(__dirname, '..', 'config', 'commands.json'));
+  const ov = cfg.commands || {};
+  const files = fs.readdirSync(dir)
+    .filter(f => f.endsWith('.js') && !f.endsWith('.old') && f !== 'help.js');
 
+  const metas = [];
   for (const f of files) {
     try {
-      const mod = require(path.join(commandsDir, f));
-      if (!mod || !mod.name) continue;
-      const ov = overrides[(mod.name || '').toLowerCase()] || {};
-      if (ov.enabled === false) continue;
+      const mod = require(path.join(dir, f));
+      const name = String(mod.name || '').toLowerCase();
+      if (!name) continue;
+      const o = ov[name] || {};
+      if (o.enabled === false) continue;
       metas.push({
-        name: String(mod.name),
-        aliases: (ov.aliases ?? mod.aliases ?? []).map(a => String(a)),
-        description: String((ov.description ?? mod.description ?? '')).trim(),
-        permission: String((ov.permission ?? mod.permission ?? 'everyone'))
+        name,
+        aliases: (o.aliases ?? mod.aliases ?? []).map(a => String(a)),
+        description: String((o.description ?? mod.description ?? '')).trim(),
+        permission: String((o.permission ?? mod.permission ?? 'everyone')).toLowerCase(),
       });
-    } catch { /* ignore bad modules */ }
+    } catch {
+      // ignore bad modules
+    }
   }
+
   metas.sort((a, b) => a.name.localeCompare(b.name));
-  return metas;
+  return { metas, ov };
 }
 
-module.exports = {
-  name: 'help',
-  aliases: ['commands', 'cmds'],
-  description: 'List commands or get details: !help [command]',
-  permission: 'everyone',
-  cooldownSec: 2,
-  async run(ctx) {
-    const { args, say, reply, prefix } = ctx;
-    const metas = loadMeta(path.join(__dirname), path.join(__dirname, '..', 'config', 'commands.json'));
+module.exports.run = async function help(ctx, args) {
+  const prefix = String(process.env.CMD_PREFIX || '!');
+  const { metas, ov } = loadMetas();
 
-    if (args.length) {
-      const raw = args[0].toLowerCase();
-      const q = raw.startsWith(prefix.toLowerCase()) ? raw.slice(prefix.length) : raw;
-      const m = metas.find(m =>
-        m.name.toLowerCase() === q ||
-        (m.aliases || []).some(a => a.toLowerCase() === q)
-      );
-      if (!m) return reply(`no command named "${args[0]}"`);
-      const aliasStr = m.aliases && m.aliases.length ? ` (aliases: ${m.aliases.join(', ')})` : '';
-      const desc = m.description || 'no description';
-      return say(`${prefix}${m.name}${aliasStr} - ${desc} [perm: ${m.permission}]`);
+  if (args && args.length) {
+    const raw = String(args[0]).toLowerCase();
+    const q = raw.startsWith(prefix.toLowerCase()) ? raw.slice(prefix.length) : raw;
+
+    const m = metas.find(m =>
+      m.name === q ||
+      (m.aliases || []).some(a => a.toLowerCase() === q)
+    );
+
+    if (!m) {
+      await ctx.reply(`no command named "${args[0]}"`);
+      return;
     }
 
-    const names = metas.map(m => `${prefix}${m.name}`);
-    let out = 'Commands: ';
-    const shown = [];
-    for (const n of names) {
-      if ((out + (shown.length ? ', ' : '') + n).length > 450) break;
-      shown.push(n);
-      out += (shown.length === 1 ? '' : ', ') + n;
-    }
-    const remaining = names.length - shown.length;
-    if (remaining > 0) out += ` … (+${remaining} more)`;
-    out += ` - try "${prefix}help <command>"`;
-    return say(out);
+    const aliasStr = m.aliases && m.aliases.length ? ` (aliases: ${m.aliases.join(', ')})` : '';
+    const desc = m.description || 'no description';
+    const perm = m.permission || 'everyone';
+    const ovMeta = ov[m.name] || {};
+    const cd = ovMeta.cooldownSec != null ? ` cooldown ${ovMeta.cooldownSec}s` : '';
+    await ctx.reply(`ℹ️ ${prefix}${m.name}${aliasStr} - ${desc} [perm: ${perm}]${cd}`);
+    return;
   }
+
+  if (!metas.length) {
+    await ctx.reply('ℹ️ No commands are available.');
+    return;
+  }
+
+  const names = metas.map(m => `${prefix}${m.name}`);
+  let out = 'ℹ️ Commands: ';
+  const shown = [];
+  for (const n of names) {
+    if ((out + (shown.length ? ', ' : '') + n).length > 440) break;
+    shown.push(n);
+    out += (shown.length === 1 ? '' : ', ') + n;
+  }
+  const remaining = names.length - shown.length;
+  if (remaining > 0) out += ` ... (+${remaining} more)`;
+  out += ` - try "${prefix}help <command>"`;
+  await ctx.reply(out);
 };

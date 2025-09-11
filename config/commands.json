@@ -1,5 +1,4 @@
 {
-  // Per-command overrides by command "name"
   "commands": {
     "ping": {
       "description": "Health check (Pong!)",
@@ -9,6 +8,7 @@
     },
     "help": {
       "cooldownSec": 2,
+      "permission": "mod",
       "description": "List commands or details: !help [command]"
     },
     "so": {
@@ -17,16 +17,12 @@
       "cooldownSec": 5
     }
   },
-
-  // Bot greeting on join/rejoin
   "greeting": {
     "enabled": true,
-    "message": "SpiffyOS online ✅ - ready for commands.",
+    "message": "I am online ✅",
     "delayMs": 1500,
     "minIntervalSec": 900
   },
-
-  // Announcement templates
   "templates": {
     "shoutout": "Please go and give {USER} a follow {GAMEFRAG}https://twitch.tv/{LOGIN}",
     "bits":  "⭐ {USER} just cheered {BITS} bits - thank you!",
@@ -34,8 +30,6 @@
     "resub": "💜 {USER} resubscribed ({TIER}) - {MONTHS} months!",
     "gift":  "🎁 {ANON}{GIFTER} gifted {COUNT} {TIER} sub{S}!"
   },
-
-  // Bits anti-spam guard
   "cheerGuard": {
     "windowSec": 30,
     "max": 3,

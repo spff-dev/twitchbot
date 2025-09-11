@@ -1,66 +1,47 @@
-// View/set the stream title. Anyone can view; mods+broadcaster can set.
-async function getBroadcasterAccessToken() {
-  const { TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, BROADCASTER_REFRESH_TOKEN } = process.env;
-  if (!BROADCASTER_REFRESH_TOKEN) throw new Error('Missing BROADCASTER_REFRESH_TOKEN');
-  const params = new URLSearchParams({
-    client_id: TWITCH_CLIENT_ID,
-    client_secret: TWITCH_CLIENT_SECRET,
-    grant_type: 'refresh_token',
-    refresh_token: BROADCASTER_REFRESH_TOKEN
-  });
-  const res = await fetch('https://id.twitch.tv/oauth2/token', {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString()
-  });
-  if (!res.ok) throw new Error(`broadcaster token error ${res.status}`);
-  const j = await res.json();
-  return j.access_token;
+'use strict';
+
+// Get or set stream title
+// No args: show current title
+// With args: set title to the provided text (mods or broadcaster)
+
+module.exports.name = 'title';
+
+async function getJSON(res) {
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = body && body.message ? body.message : `status ${res.status}`;
+    throw new Error(msg);
+  }
+  return body;
 }
 
-function isBroadcaster(tags) { const b = tags.badges || {}; return b && b.broadcaster === '1'; }
-function isMod(tags) { return !!tags.mod || isBroadcaster(tags); }
+module.exports.run = async function title(ctx, args) {
+  try {
+    const bcId = ctx.channel.id;
 
-module.exports = {
-  name: 'title',
-  description: 'Show or set the stream title. Usage: !title | !title New Title Here',
-  permission: 'everyone',
-  cooldownSec: 0,
-  async run(ctx) {
-    const clientId = process.env.TWITCH_CLIENT_ID;
-    const channelLogin = ctx.channel.replace(/^#/, '').toLowerCase();
-    const wantsSet = ctx.args.length > 0;
-
-    const bTok = await getBroadcasterAccessToken();
-    // Resolve broadcaster id once
-    const u = await (await fetch(`https://api.twitch.tv/helix/users?login=${encodeURIComponent(channelLogin)}`, {
-      headers: { 'Authorization': `Bearer ${bTok}`, 'Client-Id': clientId }
-    })).json();
-    const broadcaster_id = u?.data?.[0]?.id;
-    if (!broadcaster_id) return ctx.replyThreaded('❌ Cannot resolve channel');
-
-    if (!wantsSet) {
-      const ch = await (await fetch(`https://api.twitch.tv/helix/channels?broadcaster_id=${broadcaster_id}`, {
-        headers: { 'Authorization': `Bearer ${bTok}`, 'Client-Id': clientId }
-      })).json();
-      const title = ch?.data?.[0]?.title || 'Untitled';
-      return ctx.say(`Title: ${title}`);
+    if (!args || args.length === 0) {
+      const tok = await ctx.getAppToken();
+      const res = await ctx.helix(`/channels?broadcaster_id=${bcId}`, { method: 'GET', token: tok });
+      const js = await getJSON(res);
+      const row = js.data && js.data[0];
+      const title = row && row.title ? row.title : '(unknown)';
+      await ctx.reply(`Title: ${title}`);
+      return;
     }
 
-    if (!isMod(ctx.tags)) return; // only mods + broadcaster may change
-    const newTitle = ctx.args.join(' ').trim();
-    if (!newTitle) return ctx.reply('ℹ️ Usage: !title New Stream Title');
-
-    const res = await fetch(`https://api.twitch.tv/helix/channels?broadcaster_id=${broadcaster_id}`, {
+    if (!(ctx.isMod || ctx.isBroadcaster)) {
+      return;
+    }
+    const newTitle = String(args.join(' ')).trim().slice(0, 140);
+    const tok = await ctx.getBroadcasterToken();
+    const res = await ctx.helix(`/channels?broadcaster_id=${bcId}`, {
       method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${bTok}`,
-        'Client-Id': clientId,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ title: newTitle })
+      token: tok,
+      json: { title: newTitle },
     });
-
-    if (res.status !== 204) return ctx.replyThread(`❌ Title update failed (${res.status})`);
-    return ctx.say(`✅ Title updated → ${newTitle}`);
+    await getJSON(res);
+    await ctx.reply(`Title updated.`);
+  } catch (e) {
+    await ctx.reply(`Title error: ${e.message}`);
   }
 };

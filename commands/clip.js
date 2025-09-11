@@ -1,80 +1,76 @@
-// Create a clip (global 30s cooldown). Anyone can trigger.
-// Replies: "Here's the clip -> https://clips.twitch.tv/<ID>"
-let lastRunAt = 0;
-const COOLDOWN_MS = 30_000;
+'use strict';
 
-async function getBroadcasterAccessToken() {
-  const { TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, BROADCASTER_REFRESH_TOKEN } = process.env;
-  if (!BROADCASTER_REFRESH_TOKEN) throw new Error('Missing BROADCASTER_REFRESH_TOKEN');
-  const params = new URLSearchParams({
-    client_id: TWITCH_CLIENT_ID,
-    client_secret: TWITCH_CLIENT_SECRET,
-    grant_type: 'refresh_token',
-    refresh_token: BROADCASTER_REFRESH_TOKEN
-  });
-  const res = await fetch('https://id.twitch.tv/oauth2/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString()
-  });
-  if (!res.ok) throw new Error(`broadcaster token error ${res.status}`);
-  const j = await res.json();
-  return j.access_token;
+// Create a clip with a global 30s cooldown. Anyone can trigger.
+// Replies with the clip URL when successful, or a clear reason otherwise.
+
+let lastRunAt = 0;
+const COOLDOWN_MS = 30000;
+
+async function asJSON(res) {
+  const txt = await res.text().catch(() => '');
+  let j = null;
+  try { j = txt ? JSON.parse(txt) : null; } catch {}
+  return { ok: res.ok, status: res.status, json: j, text: txt };
 }
 
 module.exports = {
   name: 'clip',
   description: 'Create a clip (global 30s cooldown)',
   permission: 'everyone',
-  cooldownSec: 0, // global cooldown handled here
+  cooldownSec: 0,
   async run(ctx) {
     const now = Date.now();
     const left = COOLDOWN_MS - (now - lastRunAt);
     if (left > 0) {
-      return ctx.replyThread(`⏱️ !clip is on cooldown (${Math.ceil(left / 1000)}s)`);
+      const secs = Math.ceil(left / 1000);
+      return ctx.replyThread(`clip is on cooldown (${secs}s)`);
     }
 
-    const clientId = process.env.TWITCH_CLIENT_ID;
-    const bTok = await getBroadcasterAccessToken();
-    const login = ctx.channel.replace(/^#/, '').toLowerCase();
+    try {
+      const bcId = ctx.channel.id;
 
-    // Resolve broadcaster id
-    const uRes = await fetch(`https://api.twitch.tv/helix/users?login=${encodeURIComponent(login)}`, {
-      headers: { Authorization: `Bearer ${bTok}`, 'Client-Id': clientId }
-    });
-    if (!uRes.ok) return ctx.replyThread(`❌ Can't clip right now (${uRes.status})`);
-    const u = await uRes.json();
-    const broadcaster_id = u?.data?.[0]?.id;
-    if (!broadcaster_id) return ctx.replyThread('❌ Cannot resolve channel');
+      // Check live state with app token
+      const appTok = await ctx.getAppToken();
+      const sRes = await ctx.helix(`/streams?user_id=${bcId}`, { method: 'GET', token: appTok });
+      const s = await asJSON(sRes);
+      if (!s.ok) {
+        lastRunAt = now;
+        return ctx.replyThread(`cannot read stream state (${s.status})`);
+      }
+      const live = s.json && s.json.data && s.json.data[0];
+      if (!live) {
+        lastRunAt = now;
+        return ctx.replyThread('you cannot clip while the channel is offline');
+      }
 
-    // Must be live
-    const sRes = await fetch(`https://api.twitch.tv/helix/streams?user_id=${broadcaster_id}`, {
-      headers: { Authorization: `Bearer ${bTok}`, 'Client-Id': clientId }
-    });
-    if (!sRes.ok) return ctx.replyThread(`❌ Can't read stream state (${sRes.status})`);
-    const s = await sRes.json();
-    if (!s?.data?.[0]) { lastRunAt = now; return ctx.replyThread("❌ You can't clip while the channel is offline."); }
+      // Create the clip with the broadcaster token
+      const bcTok = await ctx.getBroadcasterToken();
+      const cRes = await ctx.helix(`/clips?broadcaster_id=${bcId}`, { method: 'POST', token: bcTok });
+      const c = await asJSON(cRes);
 
-    // Create the clip
-    const cRes = await fetch(`https://api.twitch.tv/helix/clips?broadcaster_id=${broadcaster_id}`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${bTok}`, 'Client-Id': clientId }
-    });
+      if (c.status === 429) {
+        lastRunAt = now;
+        return ctx.replyThread('clip is rate limited, try again soon');
+      }
+      if (c.status !== 202) {
+        lastRunAt = now;
+        return ctx.replyThread(`clip failed (${c.status})`);
+      }
 
-    if (cRes.status === 429) return ctx.replyThread('❌ Clip rate-limited; try again soon.');
-    if (cRes.status !== 202) {
-      const t = await cRes.text().catch(() => '');
-      return ctx.replyThread(`❌ Sorry, clip failed (${cRes.status})`);
+      // Twitch often returns the id payload even though status is 202
+      const id = c.json && c.json.data && c.json.data[0] && c.json.data[0].id;
+      lastRunAt = now;
+
+      if (!id) {
+        return ctx.replyThread('clip created, but no id was returned');
+      }
+
+      // small delay to let the clip page come up
+      await new Promise(r => setTimeout(r, 1500));
+      return ctx.replyThread(`here is your clip -> https://clips.twitch.tv/${id}`);
+    } catch (e) {
+      lastRunAt = now;
+      return ctx.replyThread('clip failed');
     }
-
-    const c = await cRes.json().catch(() => null);
-    const id = c?.data?.[0]?.id;
-    if (!id) return ctx.replyThread('⚠️ Clip created, but no ID returned.');
-
-    lastRunAt = now;
-    // Give Twitch a tiny moment to make the clip page available
-    await new Promise(r => setTimeout(r, 2000));
-
-    return ctx.replyThread(`🎬 Here's your clip -> https://clips.twitch.tv/${id}`);
   }
 };

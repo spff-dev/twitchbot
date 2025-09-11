@@ -1,541 +1,481 @@
-// /srv/bots/twitchbot/bot.js
+'use strict';
+
+/**
+ * SpiffyOS Twitch bot - Chat API refactor
+ * Send: POST /helix/chat/messages using App Access Token
+ * Read: EventSub channel.chat.message using App Access Token
+ * Other EventSub topics: two user token sessions as before
+ *
+ * Logging tags:
+ *  [BOOT] startup and env
+ *  [AUTH] token cache
+ *  [SEND] chat sends
+ *  [ROUT] command routing
+ *  [ANN]  timed announcements
+ *  [ERR]  errors
+ * EventSub logging is in lib/eventsub.js as [EVT/APP], [EVT/BC], [EVT/BOT]
+ */
+
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const tmi = require('tmi.js');
-const WebSocket = require('ws'); // used by EventSub internals
-const { startEventSubBot, startEventSubBroadcaster } = require('./lib/eventsub');
-const buildHandlers = require('./events/handlers');
-const { reloadConfig: reloadCfgModule } = require('./lib/config');
 
-// ---- Env ----
 const {
-  BOT_USERNAME,
-  CHANNELS,
-  TWITCH_CLIENT_ID,
-  TWITCH_CLIENT_SECRET,
-  TWITCH_REFRESH_TOKEN,
-  BROADCASTER_REFRESH_TOKEN,
-  CMD_PREFIX = '!'
-} = process.env;
+  getAppToken,
+  getClientId,
+} = require('./lib/apptoken');
 
-if (!BOT_USERNAME || !CHANNELS || !TWITCH_CLIENT_ID || !TWITCH_CLIENT_SECRET || !TWITCH_REFRESH_TOKEN) {
-  console.error('Missing required env vars. Need BOT_USERNAME, CHANNELS, TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, TWITCH_REFRESH_TOKEN.');
+const {
+  startEventSub,
+} = require('./lib/eventsub');
+
+// env
+const CLIENT_ID = process.env.TWITCH_CLIENT_ID;
+const CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
+const BOT_LOGIN = (process.env.BOT_USERNAME || '').toLowerCase();
+const CHANNELS = (process.env.CHANNELS || '').split(',').map(s => s.trim()).filter(Boolean);
+const BROADCASTER_USER_ID = process.env.BROADCASTER_USER_ID;
+const BOT_USER_ID = process.env.BOT_USER_ID;
+const CMD_PREFIX = process.env.CMD_PREFIX || '!';
+
+// sanity
+if (!CLIENT_ID || !CLIENT_SECRET) {
+  console.error('[BOOT] missing TWITCH_CLIENT_ID or TWITCH_CLIENT_SECRET');
+  process.exit(1);
+}
+if (!BROADCASTER_USER_ID || !BOT_USER_ID) {
+  console.error('[BOOT] missing BROADCASTER_USER_ID or BOT_USER_ID in .env');
+  process.exit(1);
+}
+if (!CHANNELS.length) {
+  console.error('[BOOT] CHANNELS is empty');
   process.exit(1);
 }
 
-// ---- Auth: bot token (auto refresh) ----
-let tokenState = { accessToken: null, expiresAt: 0, refreshTimer: null };
+console.log(`[BOOT] bot=${BOT_LOGIN} bc=${BROADCASTER_USER_ID} cmd=${CMD_PREFIX}`);
 
-async function refreshAccessToken(reason = 'scheduled') {
-  const params = new URLSearchParams({
-    client_id: TWITCH_CLIENT_ID,
-    client_secret: TWITCH_CLIENT_SECRET,
-    grant_type: 'refresh_token',
-    refresh_token: TWITCH_REFRESH_TOKEN
-  });
+// simple user token caches for broadcaster and bot sessions
+let _bcToken = null;
+let _bcExp = 0;
+let _botToken = null;
+let _botExp = 0;
 
-  const res = await fetch('https://id.twitch.tv/oauth2/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString()
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Token refresh failed (${reason}): ${res.status} ${text}`);
-  }
-
-  const data = await res.json();
-  const now = Date.now();
-  const expiresInMs = (data.expires_in || 3600) * 1000;
-  tokenState.accessToken = data.access_token;
-  tokenState.expiresAt = now + expiresInMs;
-
-  const skew = Math.min(5 * 60 * 1000, Math.floor(expiresInMs * 0.1));
-  const refreshIn = Math.max(60 * 1000, expiresInMs - skew);
-  if (tokenState.refreshTimer) clearTimeout(tokenState.refreshTimer);
-  tokenState.refreshTimer = setTimeout(() => {
-    refreshAccessToken('timer').catch(err => console.error('[AUTH] scheduled refresh error:', err));
-  }, refreshIn);
-
-  console.log(`[AUTH] ${reason} refresh ok. Next refresh in ~${Math.round(refreshIn/1000)}s, expires_in=${Math.round(expiresInMs/1000)}s`);
-  return tokenState.accessToken;
-}
-function tokenWillExpireSoon() { return Date.now() > (tokenState.expiresAt - 60 * 1000); }
-
-// ---- Auth: broadcaster access token (mint on demand) ----
-let bState = { accessToken: null, expiresAt: 0 };
-async function getBroadcasterAccessToken() {
-  if (!BROADCASTER_REFRESH_TOKEN) throw new Error('Missing BROADCASTER_REFRESH_TOKEN in .env');
-  const now = Date.now();
-  if (bState.accessToken && now < (bState.expiresAt - 60 * 1000)) return bState.accessToken;
-
-  const params = new URLSearchParams({
-    client_id: TWITCH_CLIENT_ID,
-    client_secret: TWITCH_CLIENT_SECRET,
-    grant_type: 'refresh_token',
-    refresh_token: BROADCASTER_REFRESH_TOKEN
-  });
-  const res = await fetch('https://id.twitch.tv/oauth2/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString()
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Broadcaster token refresh failed: ${res.status} ${text}`);
-  }
-  const data = await res.json();
-  bState.accessToken = data.access_token;
-  bState.expiresAt = now + ((data.expires_in || 3600) * 1000);
-  return bState.accessToken;
-}
-
-// ---- JSONC command overrides and greeting ----
-const CMD_DIR = path.join(__dirname, 'commands');
-const CONFIG_PATH = path.join(__dirname, 'config', 'commands.json');
-
-function readJsonC(file) {
-  let raw = fs.readFileSync(file, 'utf8');
-  raw = raw.replace(/\/\*[\s\S]*?\*\//g, '');
-  raw = raw.replace(/(^|\s)\/\/.*$/gm, '');
-  raw = raw.replace(/,(\s*[}\]])/g, '$1');
-  return JSON.parse(raw);
-}
-
-function loadOverrides() {
-  try {
-    const json = readJsonC(CONFIG_PATH);
-    const table = {};
-    const src = (json && json.commands) || {};
-    for (const [k, v] of Object.entries(src)) table[String(k).toLowerCase()] = v || {};
-    return table;
-  } catch (e) {
-    if (e.code !== 'ENOENT') console.warn(`[CFG] Failed to read ${CONFIG_PATH}: ${e.message}`);
-    return {};
-  }
-}
-
-// Greeting config
-const DEFAULT_GREETING = {
-  enabled: true,
-  message: 'SpiffyOS online - type !help for commands.',
-  delayMs: 1500,
-  minIntervalSec: 900
-};
-let greetCfg = { ...DEFAULT_GREETING };
-function loadGreeting() {
-  try {
-    const json = readJsonC(CONFIG_PATH);
-    greetCfg = { ...DEFAULT_GREETING, ...(json.greeting || {}) };
-  } catch {
-    greetCfg = { ...DEFAULT_GREETING };
-  }
-}
-
-function applyOverride(mod, ov) {
-  if (!ov) return mod;
-  const out = { ...mod };
-  if (typeof ov.enabled === 'boolean' && ov.enabled === false) out.__disabled = true;
-  if (ov.description != null) out.description = String(ov.description);
-  if (ov.permission != null) out.permission = String(ov.permission).toLowerCase();
-  if (ov.cooldownSec != null) out.cooldownSec = Number(ov.cooldownSec) || 0;
-  if (Array.isArray(ov.aliases)) out.aliases = ov.aliases.map(a => String(a));
-  return out;
-}
-
-function loadCommands(dir, overrides) {
-  const commands = new Map();
-  const triggers = new Map();
-  if (!fs.existsSync(dir)) {
-    console.warn(`[CMD] Directory missing: ${dir}`);
-    return { commands, triggers };
-  }
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.js'));
-  for (const f of files) {
-    try {
-      const mod0 = require(path.join(dir, f));
-      if (!mod0 || !mod0.name || !mod0.run) { console.warn(`[CMD] Skipping ${f}: missing name/run`); continue; }
-      const ov = overrides[mod0.name.toLowerCase()] || null;
-      const mod = applyOverride(mod0, ov);
-      if (mod.__disabled) { console.log(`[CMD] Disabled by config: ${mod.name}`); continue; }
-      const perm = (mod.permission || 'everyone').toLowerCase();
-      if (!['everyone', 'mod', 'broadcaster'].includes(perm)) {
-        console.warn(`[CMD] ${mod.name}: invalid permission "${mod.permission}", defaulting to "everyone"`);
-        mod.permission = 'everyone';
-      }
-      const aliasList = [mod.name, ...(mod.aliases || [])].map(s => s.toLowerCase());
-      commands.set(mod.name.toLowerCase(), mod);
-      for (const a of aliasList) triggers.set(a, mod.name.toLowerCase());
-    } catch (e) {
-      console.warn(`[CMD] Failed to load ${f}: ${e.message}`);
-    }
-  }
-  console.log(`[CMD] Loaded ${commands.size} commands from ${dir}`);
-  return { commands, triggers };
-}
-
-let commands = new Map();
-let triggers = new Map();
-function clearCommandCache() {
-  for (const k of Object.keys(require.cache)) if (k.startsWith(CMD_DIR)) delete require.cache[k];
-}
-function rebuildCommands() {
-  clearCommandCache();
-  const overrides = loadOverrides();
-  loadGreeting();
-  const loaded = loadCommands(CMD_DIR, overrides);
-  commands = loaded.commands;
-  triggers = loaded.triggers;
-  console.log(`[CFG] Overrides applied from ${CONFIG_PATH}`);
-  return { count: commands.size };
-}
-
-// ---- Greeting runtime ----
-const lastGreetAt = new Map();
-const pendingGreet = new Set();
-function maybeGreet(client, channel) {
-  if (!greetCfg.enabled) return;
-  const key = channel.toLowerCase();
-  const now = Date.now();
-  const minGap = (greetCfg.minIntervalSec || 0) * 1000;
-  const last = lastGreetAt.get(key) || 0;
-  if (now - last < minGap) return;
-  if (pendingGreet.has(key)) return;
-
-  pendingGreet.add(key);
-  const delay = Math.max(0, Number(greetCfg.delayMs) || 0);
-  setTimeout(async () => {
-    try { await client.say(channel, String(greetCfg.message || DEFAULT_GREETING.message)); }
-    finally { lastGreetAt.set(key, Date.now()); pendingGreet.delete(key); }
-  }, delay);
-}
-
-// ---- Threaded reply helper via Helix ----
-const HELIX_API = 'https://api.twitch.tv/helix';
-async function sendThreadedReply({ token, clientId, channel, parentId, message }) {
-  const login = channel.replace(/^#/, '').toLowerCase();
-
-  const meRes = await fetch(`${HELIX_API}/users`, {
-    headers: { Authorization: `Bearer ${token}`, 'Client-Id': clientId }
-  });
-  const me = await meRes.json().catch(() => ({}));
-  const sender_id = me?.data?.[0]?.id;
-
-  const uRes = await fetch(`${HELIX_API}/users?login=${encodeURIComponent(login)}`, {
-    headers: { Authorization: `Bearer ${token}`, 'Client-Id': clientId }
-  });
-  const u = await uRes.json().catch(() => ({}));
-  const broadcaster_id = u?.data?.[0]?.id;
-
-  const res = await fetch(`${HELIX_API}/chat/messages`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Client-Id': clientId,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      broadcaster_id,
-      sender_id,
-      message,
-      reply_parent_message_id: parentId
-    })
-  });
-  if (res.status !== 200) throw new Error(`send reply status ${res.status}`);
-}
-
-// ---- Announcement banner helper (bot token) ----
-const idCache = { me: null, byLogin: new Map() };
-async function postAnnouncementBanner({ message, channelLogin }) {
-  const token = tokenState.accessToken;
-  const clientId = TWITCH_CLIENT_ID;
-
-  if (!idCache.me) {
-    const r = await fetch(`${HELIX_API}/users`, {
-      headers: { Authorization: `Bearer ${token}`, 'Client-Id': clientId }
-    }).then(r => r.json()).catch(() => ({}));
-    idCache.me = r?.data?.[0]?.id || null;
-  }
-  const key = String(channelLogin).toLowerCase();
-  if (!idCache.byLogin.has(key)) {
-    const r = await fetch(`${HELIX_API}/users?login=${encodeURIComponent(key)}`, {
-      headers: { Authorization: `Bearer ${token}`, 'Client-Id': clientId }
-    }).then(r => r.json()).catch(() => ({}));
-    const id = r?.data?.[0]?.id || null;
-    idCache.byLogin.set(key, id);
-  }
-  const moderator_id = idCache.me;
-  const broadcaster_id = idCache.byLogin.get(key);
-  if (!moderator_id || !broadcaster_id) return;
-
-  await fetch(`${HELIX_API}/chat/announcements?broadcaster_id=${broadcaster_id}&moderator_id=${moderator_id}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Client-Id': clientId,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ message, color: 'primary' })
-  }).catch(() => {});
-}
-
-// ---- Timed announcements scheduler ----
-const ANN_PATH = path.join(__dirname, 'config', 'announcements.js');
-let annTimers = [];
-
-function loadAnnouncementsConfig() {
-  try {
-    delete require.cache[ANN_PATH];
-    const items = require(ANN_PATH);
-    if (!Array.isArray(items)) return [];
-    return items.map(it => ({
-      text: String(it.text || '').trim(),
-      everyMin: Math.max(1, Number(it.everyMin || 0)),
-      initialDelayMin: it.initialDelayMin != null ? Math.max(0, Number(it.initialDelayMin)) : null,
-      jitterSec: Math.max(0, Number(it.jitterSec || 0)),
-      type: (it.type === 'announcement') ? 'announcement' : 'chat',
-      liveOnly: it.liveOnly == null ? true : !!it.liveOnly
-    })).filter(x => x.text && x.everyMin > 0);
-  } catch (e) {
-    console.warn(`[ANN] Failed to read ${ANN_PATH}: ${e.message}`);
-    return [];
-  }
-}
-
-async function isLive(login) {
-  if (!BROADCASTER_REFRESH_TOKEN) return false;
-  try {
-    const bTok = await getBroadcasterAccessToken();
-    const r = await fetch(`${HELIX_API}/streams?user_login=${encodeURIComponent(login)}`, {
-      headers: { Authorization: `Bearer ${bTok}`, 'Client-Id': TWITCH_CLIENT_ID }
+async function getUserToken(kind) {
+  const now = Math.floor(Date.now() / 1000);
+  if (kind === 'broadcaster') {
+    if (_bcToken && _bcExp - now > 120) return _bcToken;
+    const res = await fetch('https://id.twitch.tv/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        grant_type: 'refresh_token',
+        refresh_token: process.env.BROADCASTER_REFRESH_TOKEN,
+      }),
     });
-    if (!r.ok) return false;
-    const j = await r.json();
-    return Array.isArray(j?.data) && j.data.length > 0;
-  } catch { return false; }
-}
-
-function startAnnouncementTimers(client, channelLogins) {
-  stopAnnouncementTimers();
-
-  const items = loadAnnouncementsConfig();
-  if (!items.length) { console.log('[ANN] No timed announcements configured.'); return; }
-
-  for (const login of channelLogins) {
-    const chan = `#${login}`;
-    for (const item of items) {
-      const baseDelayMs = (item.initialDelayMin != null ? item.initialDelayMin : item.everyMin) * 60_000;
-      const jitterMs = item.jitterSec ? Math.floor(Math.random() * (item.jitterSec * 1000)) : 0;
-      const firstDelay = baseDelayMs + jitterMs;
-      const periodMs = item.everyMin * 60_000;
-
-      const tick = async () => {
-        try {
-          if (!item.liveOnly || await isLive(login)) {
-            if (item.type === 'announcement') {
-              await postAnnouncementBanner({ message: item.text, channelLogin: login });
-            } else {
-              await client.say(chan, item.text);
-            }
-          }
-        } catch {
-          // keep quiet
-        } finally {
-          const j = item.jitterSec ? Math.floor(Math.random() * (item.jitterSec * 1000)) : 0;
-          const t = setTimeout(tick, periodMs + j);
-          annTimers.push(t);
-        }
-      };
-
-      const t = setTimeout(tick, Math.max(1000, firstDelay));
-      annTimers.push(t);
+    if (!res.ok) {
+      console.error('[AUTH] refresh broadcaster token failed', res.status);
+      const body = await res.text().catch(() => '');
+      console.error('[ERR]', body);
+      throw new Error('broadcaster token refresh failed');
     }
+    const json = await res.json();
+    _bcToken = json.access_token;
+    _bcExp = now + (json.expires_in || 0);
+    console.log('[AUTH] broadcaster token refreshed');
+    return _bcToken;
+  } else if (kind === 'bot') {
+    if (_botToken && _botExp - now > 120) return _botToken;
+    const res = await fetch('https://id.twitch.tv/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        grant_type: 'refresh_token',
+        refresh_token: process.env.TWITCH_REFRESH_TOKEN,
+      }),
+    });
+    if (!res.ok) {
+      console.error('[AUTH] refresh bot token failed', res.status);
+      const body = await res.text().catch(() => '');
+      console.error('[ERR]', body);
+      throw new Error('bot token refresh failed');
+    }
+    const json = await res.json();
+    _botToken = json.access_token;
+    _botExp = now + (json.expires_in || 0);
+    console.log('[AUTH] bot token refreshed');
+    return _botToken;
   }
-
-  console.log(`[ANN] Timed announcements started for ${channelLogins.join(', ')} with ${items.length} item(s).`);
+  throw new Error('unknown token kind');
 }
 
-function stopAnnouncementTimers() {
-  for (const t of annTimers) clearTimeout(t);
-  annTimers = [];
-}
-
-// ---- Runtime config reload glue (used by !cfgreload) ----
-let currentClient = null;
-let currentChannels = [];
-
-async function reloadRuntimeConfig() {
-  // Reload template config and cheer guard
-  reloadCfgModule();
-  // Reload greeting overrides
-  loadGreeting();
-  // Restart timed announcements with any updated config
-  stopAnnouncementTimers();
-  if (currentClient && currentChannels.length) {
-    startAnnouncementTimers(currentClient, currentChannels);
-  }
-  console.log('[CFG] Runtime config reloaded.');
-}
-
-// ---- Main ----
-let eventSubBotStarted = false;
-let eventSubBcStarted  = false;
-
-async function main() {
-  await refreshAccessToken('startup');
-  const channels = CHANNELS.split(',').map(c => c.trim().replace(/^#/, '').toLowerCase()).filter(Boolean);
-  const tmiChannels = channels.map(c => `#${c}`);
-
-  const client = new tmi.Client({
-    options: { debug: false },
-    connection: { secure: true, reconnect: true },
-    identity: { username: BOT_USERNAME, password: `oauth:${tokenState.accessToken}` },
-    channels: tmiChannels
+// helix fetch helper
+async function helix(pathname, opts) {
+  const url = `https://api.twitch.tv/helix${pathname}`;
+  const res = await fetch(url, {
+    method: opts.method || 'GET',
+    headers: {
+      'Client-Id': CLIENT_ID,
+      'Authorization': `Bearer ${opts.token}`,
+      ...(opts.json ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: opts.json ? JSON.stringify(opts.json) : opts.body || undefined,
   });
+  return res;
+}
 
-  // keep in-memory password fresh
-  const originalRefresh = refreshAccessToken;
-  refreshAccessToken = async (reason) => {
-    const tok = await originalRefresh.call(null, reason);
-    client.opts.identity.password = `oauth:${tok}`;
-    console.log('[AUTH] Updated in-memory password with fresh token.');
-    return tok;
+// JSONC loader for templates
+function loadJSONC(filePath) {
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const noBlock = raw.replace(/\/\*[\s\S]*?\*\//g, '');
+  const noLine = noBlock.replace(/^\s*\/\/.*$/gm, '');
+  return JSON.parse(noLine);
+}
+
+// commands metadata and greetings
+const COMMANDS_CFG_PATH = path.join(__dirname, 'config', 'commands.json');
+const TEMPLATES_PATH = path.join(__dirname, 'config', 'templates.jsonc');
+let commandsCfg = {};
+let templates = {};
+function reloadConfigs() {
+  try {
+    commandsCfg = JSON.parse(fs.readFileSync(COMMANDS_CFG_PATH, 'utf8'));
+  } catch (e) {
+    console.error('[ERR] commands.json load failed', e.message);
+    commandsCfg = {};
+  }
+  try {
+    templates = loadJSONC(TEMPLATES_PATH);
+  } catch (e) {
+    console.error('[ERR] templates.jsonc load failed', e.message);
+    templates = {};
+  }
+}
+reloadConfigs();
+
+// dynamic command loader
+const COMMANDS_DIR = path.join(__dirname, 'commands');
+let commands = new Map();
+function loadCommands() {
+  commands.clear();
+  const files = fs.readdirSync(COMMANDS_DIR).filter(f => f.endsWith('.js'));
+  for (const f of files) {
+    const modPath = path.join(COMMANDS_DIR, f);
+    delete require.cache[require.resolve(modPath)];
+    const mod = require(modPath);
+    const name = (mod.name || path.basename(f, '.js')).toLowerCase();
+    commands.set(name, mod);
+  }
+  console.log(`[BOOT] commands loaded=${commands.size}`);
+}
+loadCommands();
+
+// cooldowns map
+const cooldowns = new Map();
+function onCooldown(cmd, userId) {
+  const key = `${cmd}:${userId}`;
+  const now = Date.now();
+  const until = cooldowns.get(key) || 0;
+  return until > now ? Math.ceil((until - now) / 1000) : 0;
+}
+function setCooldown(cmd, userId, secs) {
+  if (!secs) return;
+  cooldowns.set(`${cmd}:${userId}`, Date.now() + secs * 1000);
+}
+
+// Chat send via API using App token
+async function sendChat(message, opts) {
+  const token = await getAppToken();
+  const body = {
+    broadcaster_id: BROADCASTER_USER_ID,
+    sender_id: BOT_USER_ID,
+    message,
+  };
+  if (opts && opts.reply_parent_message_id) {
+    body.reply_parent_message_id = opts.reply_parent_message_id;
+  }
+  const res = await fetch('https://api.twitch.tv/helix/chat/messages', {
+    method: 'POST',
+    headers: {
+      'Client-Id': CLIENT_ID,
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    console.error('[SEND] failed', res.status, txt);
+    if (res.status === 401) {
+      // force app token refresh on next call
+      require('./lib/apptoken').invalidate();
+    }
+    return false;
+  }
+  console.log('[SEND] ok');
+  return true;
+}
+
+// thin context passed to commands
+const ctxBase = {
+  clientId: CLIENT_ID,
+  getAppToken,
+  getBroadcasterToken: () => getUserToken('broadcaster'),
+  getBotToken: () => getUserToken('bot'),
+  helix,
+  say: (text) => sendChat(text),
+  reply: (text, parent) => sendChat(text, { reply_parent_message_id: parent }),
+  templates: () => templates,
+  commandsCfg: () => commandsCfg,
+  reload: () => {
+    reloadConfigs();
+    loadCommands();
+    return true;
+  },
+};
+
+// command router
+async function handleCommand(ev) {
+  const text = (ev.text || '').trim();
+  if (!text.startsWith(CMD_PREFIX)) return false;
+
+  const parts = text.slice(CMD_PREFIX.length).trim().split(/\s+/);
+  const cmdName = (parts.shift() || '').toLowerCase();
+  const args = parts;
+
+  const meta = commandsCfg.commands && commandsCfg.commands[cmdName];
+  const primary = commands.get(cmdName) || (meta && meta.module ? commands.get(meta.module) : null);
+
+  if (!primary) return false;
+
+  // permissions
+  const modOnly = meta && !!meta.modOnly;
+  if (modOnly && !(ev.isMod || ev.isBroadcaster)) {
+    return false;
+  }
+
+  // cooldown
+  const cdSecs = meta && meta.cooldown ? Number(meta.cooldown) : 0;
+  const cdLeft = onCooldown(cmdName, ev.userId);
+  if (cdLeft > 0) {
+    return true;
+  }
+
+  // run
+  const ctx = {
+    ...ctxBase,
+    user: { id: ev.userId, login: ev.userLogin, display: ev.userName },
+    channel: { id: ev.channelId, login: ev.channelLogin },
+    replyParent: ev.messageId,
+    isMod: !!ev.isMod,
+    isBroadcaster: !!ev.isBroadcaster,
+    prefix: CMD_PREFIX,
+  };
+  // legacy helpers for existing commands
+  ctx.getToken = async (kind) => {
+    if (!kind || kind === 'broadcaster') return ctxBase.getBroadcasterToken();
+    if (kind === 'bot') return ctxBase.getBotToken();
+    if (kind === 'app') return ctxBase.getAppToken();
+    return ctxBase.getBroadcasterToken();
+  };
+  ctx.commands = commands;
+  ctx.listCommands = () => Array.from(commands.keys());
+  ctx.commandMeta = (name) => {
+    try { return (commandsCfg.commands && commandsCfg.commands[name]) || {}; } catch { return {}; }
   };
 
-  client.on('connected', (addr, port) => {
-    console.log(`Connected to ${addr}:${port} as ${BOT_USERNAME}, joined ${tmiChannels.join(', ')}`);
-    for (const c of tmiChannels) maybeGreet(client, c);
+  ctx.replyThread = (text, parent) => sendChat(text, { reply_parent_message_id: parent || ctx.replyParent });
+  ctx.sayThread = (text) => sendChat(text, { reply_parent_message_id: ctx.replyParent });
 
-    // store for timers reload
-    currentClient = client;
-    currentChannels = channels;
 
-    const broadcasterLogin = channels[0];
-
-    const handlers = buildHandlers({ tmiClient: client, channel: `#${broadcasterLogin}` });
-
-    if (!eventSubBotStarted) {
-      eventSubBotStarted = true;
-      startEventSubBot({
-        clientId: TWITCH_CLIENT_ID,
-        getBotToken: () => tokenState.accessToken,
-        broadcasterLogin,
-        ...handlers
-      }).catch(err => {
-        console.error('[EVT/BOT] failed to start', err);
-        eventSubBotStarted = false;
-      });
-    }
-
-    if (!eventSubBcStarted && BROADCASTER_REFRESH_TOKEN) {
-      eventSubBcStarted = true;
-      startEventSubBroadcaster({
-        clientId: TWITCH_CLIENT_ID,
-        getBroadcasterToken: () => getBroadcasterAccessToken(),
-        getBotToken: () => tokenState.accessToken,
-        broadcasterLogin,
-        ...handlers
-      }).catch(err => {
-        console.error('[EVT/BC] failed to start', err);
-        eventSubBcStarted = false;
-      });
-    }
-
-    // Start timed announcements
-    startAnnouncementTimers(client, channels);
-  });
-
-  client.on('disconnected', (reason) => {
-    console.warn('[NET] Disconnected:', reason);
-    stopAnnouncementTimers();
-    if (tokenWillExpireSoon()) {
-      refreshAccessToken('pre-reconnect')
-        .then(tok => { client.opts.identity.password = `oauth:${tok}`; })
-        .catch(err => console.error('[AUTH] pre-reconnect refresh failed:', err));
-    }
-  });
-
-  // Initial command load
-  rebuildCommands();
-
-  client.on('message', async (channel, tags, message, self) => {
-    if (self) return;
-    if (!message || message[0] !== CMD_PREFIX) return;
-
-    const user = (tags['display-name'] || tags.username || '').toString();
-    const userId = tags['user-id'] || user.toLowerCase();
-
-    const raw = message.slice(CMD_PREFIX.length).trim();
-    if (!raw) return;
-    const [cmdTrigger, ...args] = raw.split(/\s+/);
-    const key = triggers.get(cmdTrigger.toLowerCase());
-    if (!key) return;
-
-    const cmd = commands.get(key);
-
-    function isBroadcaster(t) { const b = t.badges || {}; return typeof b === 'object' && b.broadcaster === '1'; }
-    function isMod(t) { return !!t.mod || isBroadcaster(t); }
-    function hasPermission(perm, t) {
-      if (perm === 'everyone') return true;
-      if (perm === 'mod') return isMod(t);
-      if (perm === 'broadcaster') return isBroadcaster(t);
-      return false;
-    }
-
-    if (!hasPermission((cmd.permission || 'everyone').toLowerCase(), tags)) return;
-
-    if (!global.__cooldowns) global.__cooldowns = new Map();
-    const cooldowns = global.__cooldowns;
-    function checkCooldown(name, uid, sec) {
-      if (!sec) return { ok: true };
-      const bucket = cooldowns.get(name) || new Map();
-      const now = Date.now();
-      const last = bucket.get(uid) || 0;
-      const delta = (now - last) / 1000;
-      if (delta < sec) return { ok: false, wait: Math.ceil(sec - delta) };
-      bucket.set(uid, now); cooldowns.set(name, bucket);
-      return { ok: true };
-    }
-
-    const cd = checkCooldown(cmd.name.toLowerCase(), userId, cmd.cooldownSec || 0);
-    if (!cd.ok) return;
-
-    const say = (text) => client.say(channel, text);
-    const reply = (text) => client.say(channel, `@${user} ${text}`);
-
-    const replyThread = async (text) => {
-      const parentId = tags['id'];
-      try {
-        await sendThreadedReply({
-          token: tokenState.accessToken,
-          clientId: TWITCH_CLIENT_ID,
-          channel,
-          parentId,
-          message: text
-        });
-      } catch {
-        await reply(text);
-      }
-    };
-
-    try {
-      await cmd.run({
-        client, channel, tags, user, args,
-        say, reply, replyThread,
-        prefix: CMD_PREFIX,
-        reload: rebuildCommands,
-        reloadConfig: reloadRuntimeConfig,
-        getToken: () => tokenState.accessToken
-      });
-    } catch (err) {
-      console.error(`[CMD] ${cmd.name} error:`, err);
-    }
-  });
-
-  try { await client.connect(); }
-  catch (err) { console.error('Connect error:', err); process.exit(1); }
+  try {
+    const fn = primary.run || primary.default || primary;
+    const ret = await fn(ctx, args, ev);
+    if (cdSecs) setCooldown(cmdName, ev.userId, cdSecs);
+    return ret !== false;
+  } catch (e) {
+    console.error('[ERR] command error', cmdName, e.message);
+    return true;
+  }
 }
 
-main().catch(err => { console.error(err); process.exit(1); });
+// timed announcements
+let announceTimers = [];
+function clearAnnouncements() {
+  for (const t of announceTimers) clearInterval(t);
+  announceTimers = [];
+}
+function loadAnnouncements() {
+  clearAnnouncements();
+  const annPath = path.join(__dirname, 'config', 'announcements.js');
+  delete require.cache[require.resolve(annPath)];
+  let ann = require(annPath);
+  if (typeof ann === 'function') ann = ann();
+  if (!Array.isArray(ann)) return;
+
+  for (const item of ann) {
+    const every = Number(item.every_seconds || item.every || 0);
+    const msg = item.message || item.text;
+    if (!every || !msg) continue;
+    const timer = setInterval(() => {
+      sendChat(msg).catch(() => {});
+    }, every * 1000);
+    announceTimers.push(timer);
+  }
+  console.log(`[ANN] timers=${announceTimers.length}`);
+}
+loadAnnouncements();
+scheduleGreeting();
+
+// Local intake for forwarded EventSub webhook chat
+const http = require('http');
+const INTAKE_PORT = Number(process.env.INTAKE_PORT || 18082);
+const INTAKE_SECRET = process.env.WEBHOOK_SECRET || '';
+
+function startIntake() {
+  const srv = http.createServer((req, res) => {
+    if (req.method !== 'POST' || req.url !== '/_intake/chat') {
+      res.statusCode = 404; return res.end('no');
+    }
+    const key = req.headers['x-intake-secret'];
+    if (!INTAKE_SECRET || key !== INTAKE_SECRET) {
+      console.log('[INTAKE] 403');
+      res.statusCode = 403; return res.end('forbidden');
+    }
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', async () => {
+      try {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let body = JSON.parse(raw);
+const j = body && body.event ? body.event : body;
+const isMod = !!(j.is_moderator || (Array.isArray(j.badges) && j.badges.some(b => String(b.set_id || "") === "moderator")));
+        const ev = {
+          text: String((j.message_text || (j.message && j.message.text) || j.text || "")),
+          userId: String(j.chatter_user_id || ''),
+          userLogin: String(j.chatter_user_login || '').toLowerCase(),
+          userName: String(j.chatter_user_name || ''),
+          channelId: String(j.broadcaster_user_id || ''),
+          channelLogin: String(j.broadcaster_user_login || '').toLowerCase(),
+          messageId: String(j.message_id || ''),
+          isBroadcaster: String(j.chatter_user_id || '') === String(j.broadcaster_user_id || ''),
+          isMod: !!isMod
+        };
+        if (!ev.text) { res.statusCode = 204; return res.end(); }
+        await handleCommand(ev);
+        res.statusCode = 204; res.end();
+      } catch (e) {
+        console.error('[INTAKE] err', e.message);
+        res.statusCode = 400; res.end('bad');
+      }
+    });
+  });
+  srv.listen(INTAKE_PORT, '127.0.0.1', () => {
+    console.log('[INTAKE] listening 127.0.0.1:' + INTAKE_PORT);
+  });
+  return srv;
+}
+const __intake = startIntake();
+
+// start EventSub
+startEventSub({
+  clientId: CLIENT_ID,
+  getAppToken,
+  getBroadcasterToken: () => getUserToken('broadcaster'),
+  getBotToken: () => getUserToken('bot'),
+  broadcasterUserId: BROADCASTER_USER_ID,
+  botUserId: BOT_USER_ID,
+
+  // app session chat message handler
+  onChatMessage: async (ev) => {
+    // ev fields normalized by eventsub.js
+    // route commands and support threaded replies
+    const handled = await handleCommand(ev);
+    if (!handled) {
+      // no-op for normal chat lines
+    }
+  },
+
+  // broadcaster session events
+  onSub: async (ev) => {
+    // use templates if present
+    const t = templates.sub || 'Thanks for the sub!';
+    await sendChat(t.replace('{user}', ev.userLogin || ev.userName || 'friend')).catch(() => {});
+  },
+  onResub: async (ev) => {
+    const t = templates.resub || 'Thanks for resubbing, {user}!';
+    await sendChat(t.replace('{user}', ev.userLogin || ev.userName || 'friend')).catch(() => {});
+  },
+  onSubGift: async (ev) => {
+    const t = templates.subgift || '{user} gifted subs, thank you!';
+    await sendChat(t.replace('{user}', ev.userLogin || ev.userName || 'friend')).catch(() => {});
+  },
+  onCheer: async (ev) => {
+    const t = templates.bits || 'Thanks for the bits, {user}!';
+    await sendChat(t.replace('{user}', ev.userLogin || ev.userName || 'friend')).catch(() => {});
+  },
+  onRaid: async (ev) => {
+    // auto shoutout
+    try {
+      const bcToken = await getUserToken('broadcaster');
+      const res = await helix('/chat/shoutouts', {
+        method: 'POST',
+        token: bcToken,
+        json: {
+          from_broadcaster_id: BROADCASTER_USER_ID,
+          to_broadcaster_id: ev.fromBroadcasterId,
+          moderator_id: BROADCASTER_USER_ID,
+        },
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        console.error('[ERR] shoutout failed', res.status, txt);
+      }
+    } catch (e) {
+      console.error('[ERR] shoutout error', e.message);
+    }
+  },
+
+  // bot session events
+  onFollow: async (ev) => {
+    const t = templates.follow || 'Thanks for the follow, {user}!';
+    await sendChat(t.replace('{user}', ev.userLogin || ev.userName || 'friend')).catch(() => {});
+  },
+});
+
+const GREET_STATE_FILE = path.join(__dirname, '.greeting_state.json');
+
+function scheduleGreeting() {
+  const g = commandsCfg.greeting || {};
+  if (!g.enabled) return;
+  const delayMs = Number(g.delayMs || 1500);
+  const minIntervalSec = Number(g.minIntervalSec || 900);
+  let last = 0;
+  try {
+    const raw = fs.readFileSync(GREET_STATE_FILE, 'utf8');
+    last = JSON.parse(raw).last || 0;
+  } catch {}
+  const now = Math.floor(Date.now() / 1000);
+  if (minIntervalSec && now - last < minIntervalSec) {
+    console.log('[BOOT] greeting suppressed');
+    return;
+  }
+  setTimeout(async () => {
+    try {
+      const msg = String(g.message || 'I am online');
+      await sendChat(msg);
+      fs.writeFileSync(GREET_STATE_FILE, JSON.stringify({ last: Math.floor(Date.now() / 1000) }));
+      console.log('[BOOT] greeted');
+    } catch (e) {
+      console.error('[ERR] greeting failed', e.message);
+    }
+  }, delayMs);
+}
+process.on('SIGINT', () => {
+  console.log('[BOOT] stopping');
+  clearAnnouncements();
+  process.exit(0);
+});

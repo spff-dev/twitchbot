@@ -14,7 +14,7 @@ module.exports = [
     jitterSec: 60
   },
   {
-    text: 'Join my Discord → https://discord.gg/x65rDmMycn',
+    text: 'Join the Spiffcord! https://discord.gg/x65rDmMycn',
     everyMin: 60,
     jitterSec: 60
   }

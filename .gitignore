@@ -20,3 +20,8 @@ tmp/
 # OS/editor noise
 .DS_Store
 *.swp
+
+# runtime
+.greeting_state.json
+config/commands.json.bak
+scripts/hook-echo.js
