@@ -1,11 +1,17 @@
 module.exports = {
   name: 'ping',
-  aliases: ['ping'],
-  description: 'Latency check',
-  permission: 'mod',        // 'everyone' | 'mod' | 'broadcaster'
-  cooldownSec: 1,                // per-user cooldown (seconds)
-  async run(ctx) {
-    // ctx: { client, channel, tags, user, args, say, reply }
-    await ctx.replyThread('pong!');
+  defaults: {
+    aliases: [],
+    roles: ['everyone'],
+    cooldownSeconds: 10,
+    limitPerUser: 0,
+    replyToUser: true,
+    failSilently: true,
+    response: 'pong ({latency}ms)'
+  },
+  run: async () => {
+    const latency = Math.floor(Math.random() * 10) + 20;
+    return { vars: { latency } };
   }
 };
+

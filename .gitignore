@@ -1,27 +1,23 @@
 # Node
 node_modules/
 npm-debug.log*
+yarn-debug.log*
 yarn-error.log*
+pnpm-lock.yaml
+package-lock.json
 
-# Environment (NEVER commit)
+# Environment / secrets
 .env
-.env.*
-!/.env.example
+.env.local
+.env.*.local
 
-# Logs & artifacts
-*.log
-logs/
-pids/
-*.pid
-coverage/
-dist/
-tmp/
-
-# OS/editor noise
+# Local data + caches
+data/
+*.sqlite
+*.db
 .DS_Store
-*.swp
 
-# runtime
-.greeting_state.json
-config/commands.json.bak
-scripts/hook-echo.js
+# Logs
+logs/
+*.log
+*.log.*

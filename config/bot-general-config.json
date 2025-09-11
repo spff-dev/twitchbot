@@ -1,0 +1,26 @@
+{
+  "announcements": {
+    "enabled": true,
+    "onlineOnly": true,
+    "intervalSeconds": 600,
+    "messages": [
+      "Remember to follow if you’re enjoying the stream!",
+      "Join the Discord: https://example.com/discord"
+    ]
+  },
+  "greeter": {
+    "bootGreeting": {
+      "enabled": false,
+      "message": "I am online",
+      "delayMs": 1500,
+      "minIntervalSec": 900
+    }
+  },
+  "templates": {
+    "follow": "Thanks for the follow, {user}!",
+    "sub": "Thanks for the sub, {user}!",
+    "resub": "Thanks for resubbing, {user}!",
+    "subgift": "{user} gifted subs, thank you!",
+    "bits": "Thanks for the bits, {user}!"
+  }
+}

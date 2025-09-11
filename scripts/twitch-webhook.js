@@ -2,6 +2,9 @@
 
 const http = require('http');
 const crypto = require('crypto');
+const { URL } = require('url');
+const os = require('os');
+const { openDB } = require('../src/core/db');
 require('dotenv').config();
 
 const HOST = '127.0.0.1';
@@ -17,15 +20,29 @@ if (!SECRET || SECRET.length < 16) {
   process.exit(1);
 }
 
+// simple health state (updated on each valid notification)
+const health = {
+  startedAt: new Date().toISOString(),
+  lastEventAt: null,
+  eventsReceived: 0
+};
+
 function hmacMessage(sigId, ts, raw) {
   return `${sigId}${ts}${raw}`;
 }
+
 function verifySig(req, raw) {
   const id = req.headers['twitch-eventsub-message-id'] || '';
   const ts = req.headers['twitch-eventsub-message-timestamp'] || '';
   const hdr = req.headers['twitch-eventsub-message-signature'] || '';
   const want = 'sha256=' + crypto.createHmac('sha256', SECRET).update(hmacMessage(id, ts, raw)).digest('hex');
-  return { ok: crypto.timingSafeEqual(Buffer.from(hdr), Buffer.from(want)), id, ts, hdr, want };
+  let ok = false;
+  try {
+    ok = crypto.timingSafeEqual(Buffer.from(hdr), Buffer.from(want));
+  } catch {
+    ok = false;
+  }
+  return { ok, id, ts, hdr, want };
 }
 
 function send(res, code, body, extraHeaders) {
@@ -46,6 +63,36 @@ async function forwardToIntake(raw) {
 }
 
 const server = http.createServer((req, res) => {
+  // Health check (GET /healthz)
+  try {
+    const { pathname } = new URL(req.url, 'http://localhost');
+    if (req.method === 'GET' && pathname === '/healthz') {
+      let dbStatus = 'ok';
+      try {
+        const db = openDB();
+        db.prepare('SELECT 1').get();
+        db.close();
+      } catch (e) {
+        dbStatus = `error: ${e.message}`;
+      }
+      const body = JSON.stringify({
+        status: 'ok',
+        pid: process.pid,
+        hostname: os.hostname(),
+        uptimeSec: Math.floor(process.uptime()),
+        startedAt: health.startedAt,
+        lastEventAt: health.lastEventAt,
+        eventsReceived: health.eventsReceived,
+        db: dbStatus
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(body);
+      return;
+    }
+  } catch {
+    // ignore URL parse errors; fall through
+  }
+
   if (req.method !== 'POST') return send(res, 405, 'method-not-allowed');
   if (!req.url || !req.url.startsWith('/hooks/twitchbot')) return send(res, 404, 'not-found');
 
@@ -77,6 +124,11 @@ const server = http.createServer((req, res) => {
     if (type === 'notification') {
       // Ack fast, then forward the exact raw body to intake
       send(res, 200, 'ok');
+
+      // Health counters
+      health.lastEventAt = new Date().toISOString();
+      health.eventsReceived++;
+
       console.log('[WH] note sub=' + subType + ' event=' + '-' + ' len=' + raw.length);
       forwardToIntake(raw);
       return;

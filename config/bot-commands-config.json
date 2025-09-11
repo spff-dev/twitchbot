@@ -1,0 +1,213 @@
+{
+  "commands": {
+    "cfgreload": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "clip": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "dbd": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "discord": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "game": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "help": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "links": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "lurk": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "ping": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 10,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": "pong!"
+    },
+    "reload": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "rust": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "so": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "so2": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "specs": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "steam": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "time": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "title": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "uptime": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    },
+    "xmas": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "response": ""
+    }
+  }
+}
