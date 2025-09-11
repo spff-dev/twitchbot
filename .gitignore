@@ -21,3 +21,5 @@ data/
 logs/
 *.log
 *.log.*
+
+backups/

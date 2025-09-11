@@ -2,9 +2,7 @@
 
 const http = require('http');
 const crypto = require('crypto');
-const { URL } = require('url');
 const os = require('os');
-const { openDB } = require('../src/core/db');
 require('dotenv').config();
 
 const HOST = '127.0.0.1';
@@ -15,39 +13,41 @@ const SECRET = process.env.WEBHOOK_SECRET || '';
 const INTAKE_URL = process.env.INTAKE_URL || 'http://127.0.0.1:18082/_intake/chat';
 const INTAKE_SECRET = process.env.INTAKE_SECRET || '';
 
+// sanity
 if (!SECRET || SECRET.length < 16) {
-  console.error('[WH] missing WEBHOOK_SECRET');
+  console.error('[WH] missing or short WEBHOOK_SECRET');
   process.exit(1);
 }
 
-// simple health state (updated on each valid notification)
-const health = {
-  startedAt: new Date().toISOString(),
-  lastEventAt: null,
-  eventsReceived: 0
-};
+// simple state for /healthz
+const startedAt = new Date();
+let lastEventAt = null;          // Date | null
+let eventsReceived = 0;
 
+// helpers
 function hmacMessage(sigId, ts, raw) {
   return `${sigId}${ts}${raw}`;
 }
-
 function verifySig(req, raw) {
   const id = req.headers['twitch-eventsub-message-id'] || '';
   const ts = req.headers['twitch-eventsub-message-timestamp'] || '';
   const hdr = req.headers['twitch-eventsub-message-signature'] || '';
-  const want = 'sha256=' + crypto.createHmac('sha256', SECRET).update(hmacMessage(id, ts, raw)).digest('hex');
-  let ok = false;
-  try {
-    ok = crypto.timingSafeEqual(Buffer.from(hdr), Buffer.from(want));
-  } catch {
-    ok = false;
-  }
+  const want = 'sha256=' + crypto
+    .createHmac('sha256', SECRET)
+    .update(hmacMessage(id, ts, raw))
+    .digest('hex');
+  const ok = (typeof hdr === 'string') && crypto.timingSafeEqual(Buffer.from(hdr), Buffer.from(want));
   return { ok, id, ts, hdr, want };
 }
 
-function send(res, code, body, extraHeaders) {
+function sendText(res, code, body, extraHeaders) {
   const b = body || '';
-  res.writeHead(code, { 'Content-Type': 'text/plain', 'Content-Length': Buffer.byteLength(b), ...(extraHeaders || {}) });
+  res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': Buffer.byteLength(b), ...(extraHeaders || {}) });
+  res.end(b);
+}
+function sendJSON(res, code, obj) {
+  const b = Buffer.from(JSON.stringify(obj));
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': b.length });
   res.end(b);
 }
 
@@ -58,43 +58,28 @@ async function forwardToIntake(raw) {
     const r = await fetch(INTAKE_URL, { method: 'POST', headers, body: raw });
     console.log('[WH] fwd', r.status);
   } catch (e) {
-    console.error('[WH] fwd error', e.message || e);
+    console.error('[WH] fwd error', e && e.message ? e.message : e);
   }
 }
 
 const server = http.createServer((req, res) => {
-  // Health check (GET /healthz)
-  try {
-    const { pathname } = new URL(req.url, 'http://localhost');
-    if (req.method === 'GET' && pathname === '/healthz') {
-      let dbStatus = 'ok';
-      try {
-        const db = openDB();
-        db.prepare('SELECT 1').get();
-        db.close();
-      } catch (e) {
-        dbStatus = `error: ${e.message}`;
-      }
-      const body = JSON.stringify({
-        status: 'ok',
-        pid: process.pid,
-        hostname: os.hostname(),
-        uptimeSec: Math.floor(process.uptime()),
-        startedAt: health.startedAt,
-        lastEventAt: health.lastEventAt,
-        eventsReceived: health.eventsReceived,
-        db: dbStatus
-      });
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(body);
-      return;
-    }
-  } catch {
-    // ignore URL parse errors; fall through
+  // health check (NO DB TOUCH)
+  if (req.method === 'GET' && req.url === '/healthz') {
+    return sendJSON(res, 200, {
+      status: 'ok',
+      pid: process.pid,
+      hostname: os.hostname(),
+      uptimeSec: Math.floor(process.uptime()),
+      startedAt: startedAt.toISOString(),
+      lastEventAt: lastEventAt ? lastEventAt.toISOString() : null,
+      eventsReceived
+    });
   }
 
-  if (req.method !== 'POST') return send(res, 405, 'method-not-allowed');
-  if (!req.url || !req.url.startsWith('/hooks/twitchbot')) return send(res, 404, 'not-found');
+  // webhook endpoint
+  if (req.method !== 'POST' || !req.url || !req.url.startsWith('/hooks/twitchbot')) {
+    return sendText(res, 404, 'not-found');
+  }
 
   let raw = '';
   req.setEncoding('utf8');
@@ -107,40 +92,44 @@ const server = http.createServer((req, res) => {
     const { ok } = verifySig(req, raw);
     if (!ok) {
       console.error('[WH] 403 bad-signature type=' + type + ' sub=' + subType + ' len=' + raw.length);
-      return send(res, 403, 'bad-signature');
+      return sendText(res, 403, 'bad-signature');
     }
 
+    // Verification handshake
     if (type === 'webhook_callback_verification') {
       try {
         const j = JSON.parse(raw);
         const challenge = String(j.challenge || '');
         console.log('[WH] verify sub=' + subType + ' id=' + (j.subscription?.id || '-'));
-        return send(res, 200, challenge);
+        return sendText(res, 200, challenge);
       } catch {
-        return send(res, 400, 'bad-json');
+        return sendText(res, 400, 'bad-json');
       }
     }
 
+    // Notifications
     if (type === 'notification') {
-      // Ack fast, then forward the exact raw body to intake
-      send(res, 200, 'ok');
+      // Ack fast
+      sendText(res, 200, 'ok');
 
-      // Health counters
-      health.lastEventAt = new Date().toISOString();
-      health.eventsReceived++;
+      // Update health counters
+      lastEventAt = new Date();
+      eventsReceived++;
 
-      console.log('[WH] note sub=' + subType + ' event=' + '-' + ' len=' + raw.length);
+      // Forward exact raw body to intake
+      console.log('[WH] note sub=' + subType + ' len=' + raw.length);
       forwardToIntake(raw);
       return;
     }
 
+    // Revocation notices
     if (type === 'revocation') {
       console.warn('[WH] revoke sub=' + subType + ' len=' + raw.length);
-      return send(res, 200, 'ok');
+      return sendText(res, 200, 'ok');
     }
 
     console.log('[WH] unknown type=' + type + ' len=' + raw.length);
-    return send(res, 400, 'bad-type');
+    return sendText(res, 400, 'bad-type');
   });
 });
 
