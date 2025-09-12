@@ -1,16 +1,5 @@
 {
   "commands": {
-    "cfgreload": {
-      "aliases": [],
-      "roles": [
-        "everyone"
-      ],
-      "cooldownSeconds": 0,
-      "limitPerUser": 0,
-      "replyToUser": true,
-      "failSilently": true,
-      "response": ""
-    },
     "clip": {
       "aliases": [],
       "roles": [
@@ -19,22 +8,33 @@
       "cooldownSeconds": 0,
       "limitPerUser": 0,
       "replyToUser": true,
-      "failSilently": true,
-      "response": ""
+      "failSilently": false,
+      "response": "🎬 Here's your clip! --> {url}",
+      "kind": "module",
+      "category": "dynamic",
+      "templates": {
+        "offline": "❌ I can only clip while we're live.",
+        "error": "❌ Sorry, I couldn't create a clip right now."
+      },
+      "limitPerStream": 0
     },
     "dbd": {
       "aliases": [],
       "roles": [
         "everyone"
       ],
-      "cooldownSeconds": 0,
+      "cooldownSeconds": 15,
       "limitPerUser": 0,
       "replyToUser": true,
       "failSilently": true,
-      "response": ""
+      "response": "ℹ️ Spiff's DBD ID is: Spiff#d0d5 or SPIFFgg#d0d5 - depending on his name in-game.",
+      "kind": "static",
+      "category": "static"
     },
     "discord": {
-      "aliases": [],
+      "aliases": [
+        "spiffcord"
+      ],
       "roles": [
         "everyone"
       ],
@@ -42,10 +42,14 @@
       "limitPerUser": 0,
       "replyToUser": true,
       "failSilently": true,
-      "response": ""
+      "response": "💬 Join the Spiffcord! https://discord.gg/x65rDmMycn",
+      "kind": "static",
+      "category": "static"
     },
     "game": {
-      "aliases": [],
+      "aliases": [
+        "category"
+      ],
       "roles": [
         "everyone"
       ],
@@ -53,18 +57,22 @@
       "limitPerUser": 0,
       "replyToUser": true,
       "failSilently": true,
-      "response": ""
-    },
-    "help": {
-      "aliases": [],
-      "roles": [
-        "everyone"
-      ],
-      "cooldownSeconds": 0,
-      "limitPerUser": 0,
-      "replyToUser": true,
-      "failSilently": true,
-      "response": ""
+      "response": "ℹ️ Game is currently: {game}",
+      "templates": {
+        "usage": "Usage: !game [category]",
+        "show": "ℹ️ Game is currently: {gameName}",
+        "updated": "✅ Game updated to: {gameName}",
+        "noChange": "ℹ️ Game is already set to: {gameName}",
+        "notFound": "❌ Couldn’t find a game matching “{query}”",
+        "noPerms": "❌ Mods only.",
+        "error": "❌ Error updating game.",
+        "forbidden": "❌ Mods only.",
+        "same": "ℹ️ Game is already set to: {game}.",
+        "changed": "✅ Game updated to: {game}"
+      },
+      "kind": "module",
+      "category": "moderator",
+      "limitPerStream": 0
     },
     "links": {
       "aliases": [],
@@ -75,7 +83,9 @@
       "limitPerUser": 0,
       "replyToUser": true,
       "failSilently": true,
-      "response": ""
+      "response": "🔗 Spiff's links can be found here: https://spiff.gg/",
+      "kind": "static",
+      "category": "static"
     },
     "lurk": {
       "aliases": [],
@@ -86,7 +96,9 @@
       "limitPerUser": 0,
       "replyToUser": true,
       "failSilently": true,
-      "response": ""
+      "response": "👍 Thank you for the lurk! Spiff appreciates you being here <3",
+      "kind": "static",
+      "category": "static"
     },
     "ping": {
       "aliases": [],
@@ -99,19 +111,11 @@
       "failSilently": true,
       "response": "pong!"
     },
-    "reload": {
-      "aliases": [],
-      "roles": [
-        "everyone"
-      ],
-      "cooldownSeconds": 0,
-      "limitPerUser": 0,
-      "replyToUser": true,
-      "failSilently": true,
-      "response": ""
-    },
     "rust": {
-      "aliases": [],
+      "aliases": [
+        "rustyhorizons",
+        "rh"
+      ],
       "roles": [
         "everyone"
       ],
@@ -119,32 +123,70 @@
       "limitPerUser": 0,
       "replyToUser": true,
       "failSilently": true,
-      "response": ""
+      "response": "ℹ️ Did you know I run a community Rust server? Rusty Horizons is an allow-listed PVE-focused streamer-friendly Rust server. For more info on how to join go here https://www.rustyhorizons.uk/",
+      "kind": "static",
+      "category": "static"
     },
     "so": {
       "aliases": [],
       "roles": [
-        "everyone"
+        "mod"
       ],
       "cooldownSeconds": 0,
       "limitPerUser": 0,
-      "replyToUser": true,
+      "replyToUser": false,
       "failSilently": true,
-      "response": ""
+      "response": "❗ Please go and give the lovely {userDisplayName} a follow {gameFragment}https://twitch.tv/{userLogin}",
+      "templates": {
+        "usage": "Usage: !so <channel>",
+        "notFound": "❌ Could not find channel {target}.",
+        "fragments": {
+          "none": "- they are very cool and deserve your support: ",
+          "currently": "- they are currently streaming some {GAME_UPPER}. They are very cool and deserve your support: ",
+          "last": "- they were last seen streaming some {GAME_UPPER}. They are very cool and deserve your support: ",
+          "vod": "- they were last seen streaming some {GAME_UPPER}. They are very cool and deserve your support: "
+        }
+      },
+      "kind": "module",
+      "category": "moderator",
+      "doShoutout": true,
+      "limitPerStream": 0
     },
     "so2": {
-      "aliases": [],
+      "aliases": [
+        "soann",
+        "boost",
+        "so_announce"
+      ],
       "roles": [
-        "everyone"
+        "mod"
       ],
       "cooldownSeconds": 0,
       "limitPerUser": 0,
-      "replyToUser": true,
+      "replyToUser": false,
       "failSilently": true,
-      "response": ""
+      "response": "❗ Please go and give the lovely {userDisplayName} a follow {gameFragment}https://twitch.tv/{userLogin}",
+      "templates": {
+        "usage": "Usage: !so2 <channel>",
+        "notFound": "❌ Unknown user: {target}",
+        "error": "❌ Announcement error.",
+        "fragments": {
+          "none": "- they are very cool and deserve your support: ",
+          "currently": "- they are currently streaming some {GAME_UPPER}. They are very cool and deserve your support: ",
+          "last": "- they were last seen streaming some {GAME_UPPER}. They are very cool and deserve your support: ",
+          "vod": "- they were last seen streaming some {GAME_UPPER}. They are very cool and deserve your support: "
+        }
+      },
+      "kind": "module",
+      "category": "moderator",
+      "announceColor": "primary",
+      "limitPerStream": 0
     },
     "specs": {
-      "aliases": [],
+      "aliases": [
+        "pc",
+        "system"
+      ],
       "roles": [
         "everyone"
       ],
@@ -152,7 +194,9 @@
       "limitPerUser": 0,
       "replyToUser": true,
       "failSilently": true,
-      "response": ""
+      "response": "🖥️ Motherboard: Gigabyte Z690 Aorus Elite AX / CPU: Intel Core i9-12900K / RAM: Kingston Fury Beast 64Gb DDR5 / GPU: Gigabyte GeForce RTX 4090 GAMING OC 24G / OS: Windows 11",
+      "kind": "static",
+      "category": "static"
     },
     "steam": {
       "aliases": [],
@@ -163,7 +207,9 @@
       "limitPerUser": 0,
       "replyToUser": true,
       "failSilently": true,
-      "response": ""
+      "response": "🎮 Spiff's Steam profile is: https://steamcommunity.com/id/spiffgg/",
+      "kind": "static",
+      "category": "static"
     },
     "time": {
       "aliases": [],
@@ -174,7 +220,11 @@
       "limitPerUser": 0,
       "replyToUser": true,
       "failSilently": true,
-      "response": ""
+      "response": "⌚ The time for Spiff is: {time}",
+      "kind": "module",
+      "category": "dynamic",
+      "timezone": "Europe/London",
+      "limitPerStream": 0
     },
     "title": {
       "aliases": [],
@@ -185,7 +235,18 @@
       "limitPerUser": 0,
       "replyToUser": true,
       "failSilently": true,
-      "response": ""
+      "response": "{out}",
+      "templates": {
+        "usage": "Usage: !title [new title]",
+        "show": "ℹ️ Title is currently: {title}",
+        "updated": "✅ Title updated to: {title}",
+        "noChange": "ℹ️ Title already set to: {title}",
+        "noPerms": "❌ Mods only.",
+        "error": "❌ Error updating title."
+      },
+      "limitPerStream": 0,
+      "category": "dynamic",
+      "kind": "module"
     },
     "uptime": {
       "aliases": [],
@@ -196,10 +257,20 @@
       "limitPerUser": 0,
       "replyToUser": true,
       "failSilently": true,
-      "response": ""
+      "response": "⏳ Spiff has been online for: {uptimeText}",
+      "templates": {
+        "offline": "offline",
+        "onlineShort": "{m}m",
+        "onlineLong": "{h}h {m}m"
+      },
+      "limitPerStream": 0,
+      "category": "dynamic",
+      "kind": "module"
     },
     "xmas": {
-      "aliases": [],
+      "aliases": [
+        "christmas"
+      ],
       "roles": [
         "everyone"
       ],
@@ -207,7 +278,10 @@
       "limitPerUser": 0,
       "replyToUser": true,
       "failSilently": true,
-      "response": ""
+      "response": "{out}",
+      "kind": "module",
+      "category": "static",
+      "limitPerStream": 0
     }
   }
 }

@@ -10,8 +10,8 @@
   },
   "greeter": {
     "bootGreeting": {
-      "enabled": false,
-      "message": "I am online",
+      "enabled": true,
+      "message": "✅ I am online",
       "delayMs": 1500,
       "minIntervalSec": 900
     }
@@ -21,6 +21,35 @@
     "sub": "Thanks for the sub, {user}!",
     "resub": "Thanks for resubbing, {user}!",
     "subgift": "{user} gifted subs, thank you!",
-    "bits": "Thanks for the bits, {user}!"
+    "bits": "Thanks for the bits, {user}!",
+    "raid": "Thanks for the raid, {user}! Welcome raiders!"
+  },
+  "events": {
+    "follow": {
+      "enabled": true,
+      "anonymous": false,
+      "anonymousName": "friend"
+    },
+    "sub": {
+      "enabled": true
+    },
+    "resub": {
+      "enabled": true
+    },
+    "subgift": {
+      "enabled": true
+    },
+    "bits": {
+      "enabled": true
+    },
+    "raid": {
+      "enabled": true
+    }
+  },
+  "greeting": {
+    "enabled": true,
+    "message": "SpiffyOS is online o7",
+    "delayMs": 1500,
+    "minIntervalSec": 900
   }
 }
