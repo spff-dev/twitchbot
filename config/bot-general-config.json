@@ -8,12 +8,12 @@
       "Join the Discord: https://example.com/discord"
     ]
   },
-  "greeter": {
+  "greeting": {
     "bootGreeting": {
       "enabled": true,
       "message": "✅ I am online",
       "delayMs": 1500,
-      "minIntervalSec": 900
+      "minIntervalSec": 30
     }
   },
   "templates": {
@@ -45,11 +45,5 @@
     "raid": {
       "enabled": true
     }
-  },
-  "greeting": {
-    "enabled": true,
-    "message": "SpiffyOS is online o7",
-    "delayMs": 1500,
-    "minIntervalSec": 900
   }
 }
