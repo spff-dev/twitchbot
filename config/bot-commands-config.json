@@ -1,7 +1,7 @@
 {
   "commands": {
     "clip": {
-      "aliases": [],
+      "response": "🎬 Here's your clip! --> {url}",
       "roles": [
         "everyone"
       ],
@@ -9,7 +9,7 @@
       "limitPerUser": 0,
       "replyToUser": true,
       "failSilently": false,
-      "response": "🎬 Here's your clip! --> {url}",
+      "aliases": [],
       "kind": "module",
       "category": "dynamic",
       "templates": {
@@ -47,17 +47,17 @@
       "category": "static"
     },
     "game": {
-      "aliases": [
-        "category"
-      ],
+      "response": "ℹ️ Game is currently: {game}",
       "roles": [
         "everyone"
       ],
       "cooldownSeconds": 0,
-      "limitPerUser": 0,
       "replyToUser": true,
+      "aliases": [
+        "category"
+      ],
+      "limitPerUser": 0,
       "failSilently": true,
-      "response": "ℹ️ Game is currently: {game}",
       "templates": {
         "usage": "Usage: !game [category]",
         "show": "ℹ️ Game is currently: {gameName}",
@@ -128,13 +128,14 @@
       "category": "static"
     },
     "so": {
-      "aliases": [],
       "roles": [
         "mod"
       ],
       "cooldownSeconds": 0,
-      "limitPerUser": 0,
       "replyToUser": false,
+      "doShoutout": true,
+      "aliases": [],
+      "limitPerUser": 0,
       "failSilently": true,
       "response": "MegaphoneZ Please go and give the lovely {userDisplayName} a follow {gameFragment}https://twitch.tv/{userLogin}",
       "templates": {
@@ -149,21 +150,21 @@
       },
       "kind": "module",
       "category": "moderator",
-      "doShoutout": true,
       "limitPerStream": 0
     },
     "so2": {
+      "roles": [
+        "mod"
+      ],
+      "cooldownSeconds": 0,
+      "replyToUser": false,
+      "announceColor": "primary",
       "aliases": [
         "soann",
         "boost",
         "so_announce"
       ],
-      "roles": [
-        "mod"
-      ],
-      "cooldownSeconds": 0,
       "limitPerUser": 0,
-      "replyToUser": false,
       "failSilently": true,
       "response": "MegaphoneZ Please go and give the lovely {userDisplayName} a follow {gameFragment}https://twitch.tv/{userLogin}",
       "templates": {
@@ -179,7 +180,6 @@
       },
       "kind": "module",
       "category": "moderator",
-      "announceColor": "primary",
       "limitPerStream": 0
     },
     "specs": {
@@ -212,27 +212,28 @@
       "category": "static"
     },
     "time": {
-      "aliases": [],
+      "response": "⌚ The time for Spiff is: {time}",
+      "timezone": "Europe/London",
       "roles": [
         "everyone"
       ],
       "cooldownSeconds": 0,
-      "limitPerUser": 0,
       "replyToUser": true,
+      "aliases": [],
+      "limitPerUser": 0,
       "failSilently": true,
-      "response": "⌚ The time for Spiff is: {time}",
       "kind": "module",
       "category": "dynamic",
-      "timezone": "Europe/London",
       "limitPerStream": 0
     },
     "title": {
-      "aliases": [],
       "roles": [
         "everyone"
       ],
-      "cooldownSeconds": 0,
       "limitPerUser": 0,
+      "limitPerStream": 0,
+      "aliases": [],
+      "cooldownSeconds": 0,
       "replyToUser": true,
       "failSilently": true,
       "response": "{out}",
@@ -244,17 +245,17 @@
         "noPerms": "❌ Mods only.",
         "error": "❌ Error updating title."
       },
-      "limitPerStream": 0,
       "category": "dynamic",
       "kind": "module"
     },
     "uptime": {
-      "aliases": [],
       "roles": [
         "everyone"
       ],
-      "cooldownSeconds": 0,
       "limitPerUser": 0,
+      "limitPerStream": 0,
+      "aliases": [],
+      "cooldownSeconds": 0,
       "replyToUser": true,
       "failSilently": true,
       "response": "⏳ Spiff has been online for: {uptimeText}",
@@ -263,22 +264,21 @@
         "onlineShort": "{m}m",
         "onlineLong": "{h}h {m}m"
       },
-      "limitPerStream": 0,
       "category": "dynamic",
       "kind": "module"
     },
     "xmas": {
+      "response": "{out}",
+      "cooldownSeconds": 0,
+      "replyToUser": true,
       "aliases": [
         "christmas"
       ],
       "roles": [
         "everyone"
       ],
-      "cooldownSeconds": 0,
       "limitPerUser": 0,
-      "replyToUser": true,
       "failSilently": true,
-      "response": "{out}",
       "kind": "module",
       "category": "static",
       "limitPerStream": 0

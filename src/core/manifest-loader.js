@@ -57,7 +57,6 @@ function loadManifestsAndConfig({ root, commandsDir, configPath, logger = consol
   const manifests = [];
 
   for (const fileAbs of files) {
-    // Always absolute; cache-bust and load
     try { delete require.cache[require.resolve(fileAbs)]; } catch {}
     let mod;
     try {
@@ -67,21 +66,29 @@ function loadManifestsAndConfig({ root, commandsDir, configPath, logger = consol
       continue;
     }
 
-    const schemaVersion = mod?.schemaVersion ?? mod?.default?.schemaVersion;
-    const m = mod?.manifest ?? mod?.default?.manifest;
-    if (schemaVersion !== 3 || !m) {
-      // Not a v3 manifest command, ignore silently
+    // --- Start of fix ---
+    // Handle both old (v1) and new (v3) command formats
+    let manifest;
+    const schemaVersion = mod?.schemaVersion;
+
+    if (schemaVersion === 3 && mod.manifest) {
+      manifest = mod.manifest; // New v3 format
+    } else if (schemaVersion === 1) {
+      manifest = mod; // Old v1 format
+    } else {
+      // Not a recognized command format, skip it
       continue;
     }
+    // --- End of fix ---
 
-    const name = m.name || path.basename(fileAbs, '.js');
-    const kind = normalizeKind(m.kind);
-    const category = safeLower(m.category, (kind === 'static' ? 'static' : 'dynamic'));
+    const name = manifest.name || path.basename(fileAbs, '.js');
+    const kind = normalizeKind(manifest.kind);
+    const category = safeLower(manifest.category, (kind === 'static' ? 'static' : 'dynamic'));
 
     manifests.push({
       file: fileAbs,
       name,
-      manifest: { ...m, name, kind, category }
+      manifest: { ...manifest, name, kind, category }
     });
   }
 
@@ -93,16 +100,13 @@ function loadManifestsAndConfig({ root, commandsDir, configPath, logger = consol
     const defaults = entry.manifest.defaults || {};
     const existing = cfg.commands[name] || {};
 
-    // Merge manifest defaults -> existing config
     const merged = deepMerge(defaults, existing);
 
-    // Normalize kind/category with safe fallbacks
     merged.kind = normalizeKind(merged.kind || entry.manifest.kind || 'module');
     merged.category = safeLower(
       merged.category || entry.manifest.category || (merged.kind === 'static' ? 'static' : 'dynamic')
     );
 
-    // Ensure response exists for non-module commands
     if (merged.kind !== 'module' && typeof merged.response !== 'string') {
       merged.response = '';
     }
@@ -110,11 +114,9 @@ function loadManifestsAndConfig({ root, commandsDir, configPath, logger = consol
     cfg.commands[name] = merged;
   }
 
-  // Persist any new seeds/normalizations
   try { writeJSON(configPath, cfg); }
   catch (e) { logger.warn('[CFG] write failed', e.message); }
 
-  // Build runtime maps for router
   const registry = new Map();
   const aliasMap = new Map();
 
