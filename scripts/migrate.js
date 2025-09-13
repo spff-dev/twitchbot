@@ -1,78 +1,85 @@
 #!/usr/bin/env node
-const { openDB } = require("../src/core/db");
+'use strict';
 
-const MIGRATIONS_V1 = [
-  `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);`,
-  `CREATE TABLE IF NOT EXISTS streams (
-     id INTEGER PRIMARY KEY,
-     started_at TEXT NOT NULL,
-     ended_at   TEXT
-   );`,
-  `CREATE TABLE IF NOT EXISTS users (
-     id TEXT PRIMARY KEY,           -- twitch user id
-     login TEXT NOT NULL,
-     first_seen_at TEXT NOT NULL,
-     last_seen_stream_id INTEGER
-   );`,
-  `CREATE TABLE IF NOT EXISTS command_usage (
-     ts TEXT NOT NULL,
-     stream_id INTEGER,
-     user_id TEXT,
-     login TEXT,
-     command TEXT NOT NULL,
-     ok INTEGER NOT NULL,           -- 1=success, 0=blocked/error
-     reason TEXT,
-     message_id TEXT
-   );`,
-  `CREATE INDEX IF NOT EXISTS idx_command_usage_stream ON command_usage(stream_id);`,
-  `CREATE INDEX IF NOT EXISTS idx_command_usage_user   ON command_usage(user_id);`,
-  `CREATE TABLE IF NOT EXISTS permits (
-     user_id TEXT PRIMARY KEY,
-     expires_at TEXT NOT NULL
-   );`
-];
+/**
+ * Schema v3
+ *  v1: initial tables (message_counts, command_usage, etc.)
+ *  v2: WAL + busy_timeout, integrity check
+ *  v3: moderation tables:
+ *      - permits(user_id TEXT, login TEXT, expires_at INTEGER, granted_by TEXT, created_at TEXT)
+ *      - moderation_events(type TEXT, user_id TEXT, login TEXT, message_id TEXT, action TEXT, reason TEXT, ts TEXT)
+ */
 
-const MIGRATIONS_V2 = [
-  // counts-only, no message text; stream_id can be NULL until we wire stream sessions
-  `CREATE TABLE IF NOT EXISTS message_counts (
-     user_id   TEXT NOT NULL,
-     login     TEXT NOT NULL,
-     stream_id INTEGER,             -- nullable until stream tracking is in place
-     count     INTEGER NOT NULL DEFAULT 0,
-     PRIMARY KEY (user_id, stream_id)
-   );`,
-  `CREATE INDEX IF NOT EXISTS idx_msg_counts_stream ON message_counts(stream_id);`
-];
+const path = require('path');
+const { openDB } = require('../src/core/db.js');
 
-function getSchema(db) {
-  const row = db.prepare(`SELECT value FROM meta WHERE key='schema'`).get();
-  return row ? Number(row.value) : 0;
-}
-function setSchema(db, v) {
-  db.prepare(`INSERT OR REPLACE INTO meta (key,value) VALUES ('schema', ?)`).run(String(v));
-}
+(async () => {
+  const db = openDB(path.join(__dirname, '..', 'data', 'bot.db'));
 
-(function run() {
-  const db = openDB();
-  db.exec("BEGIN");
+  // Ensure WAL + busy_timeout + integrity sanity (v2)
+  db.pragma('journal_mode = WAL');
+  db.pragma('busy_timeout = 5000');
   try {
-    // v1 base
-    for (const sql of MIGRATIONS_V1) db.exec(sql);
-    const current = getSchema(db);
-    if (current < 2) {
-      for (const sql of MIGRATIONS_V2) db.exec(sql);
-      setSchema(db, 2);
-      db.exec("COMMIT");
-      console.log("[migrate] schema=2 ok");
-    } else {
-      db.exec("COMMIT");
-      console.log("[migrate] schema up-to-date (", current, ")");
+    const ok = db.prepare('PRAGMA integrity_check').pluck().get();
+    if (String(ok).toLowerCase() !== 'ok') {
+      console.error('[migrate] integrity_check failed:', ok);
     }
   } catch (e) {
-    db.exec("ROLLBACK");
-    console.error("[migrate] failed:", e.message);
-    process.exit(1);
-  } finally {
-    db.close();
+    console.error('[migrate] integrity_check error:', e.message || e);
   }
-})();
+
+  const get = db.prepare('PRAGMA user_version').pluck().get();
+  const cur = Number(get || 0);
+  let v = cur;
+
+  db.transaction(() => {
+    if (v < 1) {
+      db.pragma('user_version = 1');
+      v = 1;
+    }
+    if (v < 2) {
+      db.pragma('user_version = 2');
+      v = 2;
+    }
+    if (v < 3) {
+      // permits
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS permits (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id TEXT NOT NULL,
+          login   TEXT NOT NULL,
+          expires_at INTEGER NOT NULL,
+          granted_by TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+     `).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_permits_user ON permits(user_id);`).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_permits_expires ON permits(expires_at);`).run();
+
+      // moderation events log
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS moderation_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          type TEXT NOT NULL,
+          user_id TEXT,
+          login TEXT,
+          message_id TEXT,
+          action TEXT,
+          reason TEXT,
+          ts TEXT DEFAULT (datetime('now'))
+        );
+      `).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_mod_evt_ts ON moderation_events(ts);`).run();
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_mod_evt_type ON moderation_events(type);`).run();
+
+      db.pragma('user_version = 3');
+      v = 3;
+    }
+  })();
+
+  console.log('[migrate] schema=' + v + ' ok');
+  db.close();
+})().catch(e => {
+  console.error('[migrate] error', e);
+  process.exit(1);
+});

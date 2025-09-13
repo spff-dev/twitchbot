@@ -136,7 +136,7 @@
       "limitPerUser": 0,
       "replyToUser": false,
       "failSilently": true,
-      "response": "❗ Please go and give the lovely {userDisplayName} a follow {gameFragment}https://twitch.tv/{userLogin}",
+      "response": "MegaphoneZ Please go and give the lovely {userDisplayName} a follow {gameFragment}https://twitch.tv/{userLogin}",
       "templates": {
         "usage": "Usage: !so <channel>",
         "notFound": "❌ Could not find channel {target}.",
@@ -165,7 +165,7 @@
       "limitPerUser": 0,
       "replyToUser": false,
       "failSilently": true,
-      "response": "❗ Please go and give the lovely {userDisplayName} a follow {gameFragment}https://twitch.tv/{userLogin}",
+      "response": "MegaphoneZ Please go and give the lovely {userDisplayName} a follow {gameFragment}https://twitch.tv/{userLogin}",
       "templates": {
         "usage": "Usage: !so2 <channel>",
         "notFound": "❌ Unknown user: {target}",
@@ -282,6 +282,26 @@
       "kind": "module",
       "category": "static",
       "limitPerStream": 0
+    },
+    "permit": {
+      "aliases": [],
+      "roles": [
+        "everyone"
+      ],
+      "cooldownSeconds": 0,
+      "limitPerUser": 0,
+      "limitPerStream": 0,
+      "replyToUser": true,
+      "failSilently": true,
+      "category": "dynamic",
+      "kind": "module",
+      "response": "{out}",
+      "templates": {
+        "usage": "Usage: !permit <user> [seconds]",
+        "notFound": "Unknown user: {target}",
+        "done": "Permitted {target} for {ttl}s.",
+        "error": "permit error: {reason}"
+      }
     }
   }
 }

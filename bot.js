@@ -1,5 +1,8 @@
 'use strict';
 
+const linkguard = require('./src/moderation/linkguard');
+
+
 /**
  * SpiffyOS Twitch bot - manifest+actions core, config-first JSON
  *
@@ -141,6 +144,54 @@ async function sendChat(message, opts) {
   }
   console.log('[SEND] ok');
   return true;
+}
+
+
+// === [LINKGUARD ROUTER] ===
+async function routeChat(ev) {
+  // Context for link guard + command router
+  const ctx = {
+    // helix + tokens for LG and commands
+    helix,
+    getAppToken,
+    getBroadcasterToken: () => getUserToken('broadcaster'),
+    getBotToken:        () => getUserToken('bot'),
+    clientId: CLIENT_ID,
+    broadcasterUserId: BROADCASTER_USER_ID,
+    botUserId: BOT_USER_ID,
+
+    // config helpers
+    generalCfg: () => {
+      try { return JSON.parse(fs.readFileSync(path.join(__dirname,'config','bot-general-config.json'),'utf8')); } catch { return {}; }
+    },
+    commandMeta: (name) => {
+      try { const j = require('./config/bot-commands-config.json'); return (j.commands && j.commands[name]) || {}; } catch { return {}; }
+    },
+
+    // chat helpers
+    reply: (text, parent) => sendChat(text, { reply_parent_message_id: parent || ev.messageId }),
+    say:   (text) => sendChat(text),
+
+    // caller context
+    user:  { id: ev.userId, login: ev.userLogin, display: ev.userName },
+    channel: { id: ev.channelId, login: ev.channelLogin },
+    isMod: !!ev.isMod,
+    isBroadcaster: !!ev.isBroadcaster
+  };
+
+  try {
+    const gen = ctx.generalCfg() || {};
+    const lg  = (gen.moderation && gen.moderation.linkGuard) || null;
+
+    // Only run link guard on non-command messages
+    const isCommand = (ev.text || '').trim().startsWith(CMD_PREFIX);
+    if (!isCommand && await linkguard.checkAndHandle(ev, ctx, lg)) return true;
+  } catch (e) {
+    console.warn('[LG] route error', e && e.message ? e.message : e);
+  }
+
+  // Otherwise, route as a command (or ignore if not a command)
+  return handleCommand(ev);
 }
 
 // ───────────────────────────────────────────────────────────────────────────────

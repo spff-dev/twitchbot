@@ -9,12 +9,10 @@
     ]
   },
   "greeting": {
-    "bootGreeting": {
-      "enabled": true,
-      "message": "✅ I am online",
-      "delayMs": 1500,
-      "minIntervalSec": 30
-    }
+    "enabled": true,
+    "message": "✅ I am online",
+    "delayMs": 1500,
+    "minIntervalSec": 30
   },
   "templates": {
     "follow": "Thanks for the follow, {user}!",
@@ -44,6 +42,22 @@
     },
     "raid": {
       "enabled": true
+    }
+  },
+  "moderation": {
+    "linkGuard": {
+      "enabled": true,
+      "deleteOnly": true,
+      "warnTemplate": "@{login} links aren’t allowed. Ask a mod for !permit.",
+      "allowedRoles": [
+        "mod",
+        "owner"
+      ],
+      "whitelistHosts": [
+        "twitch.tv",
+        "clips.twitch.tv"
+      ],
+      "permitTtlSec": 180
     }
   }
 }
