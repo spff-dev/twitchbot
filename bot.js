@@ -14,7 +14,7 @@ const linkguard = require('./src/moderation/linkguard');
  *   Twitch -> (webhook: scripts/twitch-webhook.js) -> POST /_intake/chat -> router -> sendChat (Helix)
  *
  * EventSub (subs/follows/bits/raid):
- *   startEventSub() using proper user tokens (FIX: pass real getters here)
+ *   startEventSub() using proper user tokens
  */
 
 require('dotenv').config();
@@ -72,7 +72,7 @@ async function helix(pathname, opts) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// User tokens (FIX: proper getters with caching)
+// User tokens (proper getters with caching)
 // ───────────────────────────────────────────────────────────────────────────────
 let _bcTok = null, _bcExp = 0;
 let _botTok = null, _botExp = 0;
@@ -149,30 +149,29 @@ async function sendChat(message, opts) {
 
 // === [LINKGUARD ROUTER] ===
 async function routeChat(ev) {
-  // Context for link guard + command router
+  if (process.env.LINKGUARD_DEBUG && process.env.LINKGUARD_DEBUG !== '0') {
+    try { console.log('[LG] routeChat start', { text: ev && ev.text, user: ev && ev.userLogin }); } catch {}
+  }
+
   const ctx = {
-    // helix + tokens for LG and commands
     helix,
     getAppToken,
-    getBroadcasterToken: () => getUserToken('broadcaster'),
-    getBotToken:        () => getUserToken('bot'),
+    // IMPORTANT: pass the real token getters (not undefined wrappers)
+    getBroadcasterToken,
+    getBotToken,
     clientId: CLIENT_ID,
     broadcasterUserId: BROADCASTER_USER_ID,
     botUserId: BOT_USER_ID,
-
-    // config helpers
     generalCfg: () => {
-      try { return JSON.parse(fs.readFileSync(path.join(__dirname,'config','bot-general-config.json'),'utf8')); } catch { return {}; }
+      try { return JSON.parse(require('fs').readFileSync(require('path').join(__dirname,'config','bot-general-config.json'),'utf8')); }
+      catch { return {}; }
     },
     commandMeta: (name) => {
-      try { const j = require('./config/bot-commands-config.json'); return (j.commands && j.commands[name]) || {}; } catch { return {}; }
+      try { const j = require('./config/bot-commands-config.json'); return (j.commands && j.commands[name]) || {}; }
+      catch { return {}; }
     },
-
-    // chat helpers
-    reply: (text, parent) => sendChat(text, { reply_parent_message_id: parent || ev.messageId }),
+    reply: (text, parent) => sendChat(text, { reply_parent_message_id: parent || (ev && ev.messageId) }),
     say:   (text) => sendChat(text),
-
-    // caller context
     user:  { id: ev.userId, login: ev.userLogin, display: ev.userName },
     channel: { id: ev.channelId, login: ev.channelLogin },
     isMod: !!ev.isMod,
@@ -182,16 +181,17 @@ async function routeChat(ev) {
   try {
     const gen = ctx.generalCfg() || {};
     const lg  = (gen.moderation && gen.moderation.linkGuard) || null;
-
-    // Only run link guard on non-command messages
     const isCommand = (ev.text || '').trim().startsWith(CMD_PREFIX);
-    if (!isCommand && await linkguard.checkAndHandle(ev, ctx, lg)) return true;
+    if (!isCommand) {
+      const acted = await linkguard.checkAndHandle(ev, ctx, lg);
+      if (acted) return true;
+    }
   } catch (e) {
     console.warn('[LG] route error', e && e.message ? e.message : e);
   }
 
-  // Otherwise, route as a command (or ignore if not a command)
-  return handleCommand(ev);
+  // IMPORTANT: route commands via the manifest router
+  return router.handle(ev);
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -211,8 +211,8 @@ const router = createRouter({
   registry, aliasMap, config,
   db, sendChat,
   getAppToken,
-  getBroadcasterToken,   // <-- pass the real getters here
-  getBotToken,           // <-- and here
+  getBroadcasterToken,
+  getBotToken,
   helix,
   broadcasterUserId: BROADCASTER_USER_ID,
   botUserId: BOT_USER_ID,
@@ -253,7 +253,7 @@ function startIntake() {
         };
 
         if (!ev.text) { res.statusCode = 204; return res.end(); }
-        await router.handle(ev);
+        await routeChat(ev);
         res.statusCode = 204; res.end();
       } catch (e) {
         console.error('[INTAKE] err', e.message);
@@ -276,13 +276,13 @@ const eventMsgs = initEventMessages({
 });
 
 // ───────────────────────────────────────────────────────────────────────────────
-// EventSub (FIX: pass correct token getters)
+// EventSub
 // ───────────────────────────────────────────────────────────────────────────────
 startEventSub({
   clientId: CLIENT_ID,
   getAppToken,
-  getBroadcasterToken,   // <-- FIXED: real function
-  getBotToken,           // <-- FIXED: real function
+  getBroadcasterToken,
+  getBotToken,
   broadcasterUserId: BROADCASTER_USER_ID,
   botUserId: BOT_USER_ID,
 

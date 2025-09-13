@@ -1,138 +1,121 @@
 'use strict';
 
-const { URL } = require('url');
-const path = require('path');
-const { openDB } = require('../core/db.js');
-
-const BOT_USER_ID = String(process.env.BOT_USER_ID || '');
-const DEBUG = process.env.LINKGUARD_DEBUG === '1';
-
-function db() {
-  return openDB(path.join(__dirname, '..', '..', 'data', 'bot.db'));
-}
-
-function dlog(...a) { if (DEBUG) console.log('[LG]', ...a); }
-
 /**
- * Extract links from a chat line.
- * - Matches http/https URLs
- * - Also matches bare www.* and normalizes them to http://
+ * Link guard: reply in-thread (if possible), then delete offending message.
+ * Respects permits from permit-store. Whitelists configured hosts.
+ *
+ * Exported API expected by bot.js:
+ *   checkAndHandle(ev, ctx, cfg) -> true if it acted (warned/deleted), else false
+ *
+ * ev:  { text, userLogin, userId, channelId, messageId, isMod, isBroadcaster }
+ * ctx: { helix, getBotToken, clientId, broadcasterUserId, botUserId, say(text), reply(text, parentId), generalCfg() }
+ * cfg: bot-general-config.json -> moderation.linkGuard (may be null/undefined)
  */
-function extractLinks(text) {
-  const found = new Set();
 
-  // http(s) URLs
-  const reHttp = /\bhttps?:\/\/[^\s)]+/gi;
-  for (const m of text.matchAll(reHttp)) found.add(m[0]);
+const store = require('./permit-store');
 
-  // www.* forms
-  const reWww = /\bwww\.[^\s)]+/gi;
-  for (const m of text.matchAll(reWww)) {
-    const s = m[0].startsWith('http') ? m[0] : `http://${m[0]}`;
-    found.add(s);
-  }
+// very forgiving matcher: scheme-less domains, with or without paths
+const URLish = /(?:(?:https?:\/\/)?(?:www\.)?)([a-z0-9-]+(?:\.[a-z0-9-]+)+)(?:\/\S*)?/i;
 
-  return Array.from(found);
+function extractHost(s) {
+  const text = String(s || '');
+  const m = text.match(URLish);
+  if (!m) return null;
+  // normalize: strip leading www.
+  const host = String(m[1] || '').toLowerCase();
+  return host.replace(/^www\./, '');
 }
 
-function hostAllowed(u, whitelist) {
+async function deleteMessage(ev, ctx) {
+  if (!ev?.messageId) return false;
   try {
-    const h = new URL(u).hostname.toLowerCase();
-    return whitelist.some(w => h === w || h.endsWith('.' + w));
-  } catch { return false; }
-}
-
-function hasPermit(userId) {
-  const now = Math.floor(Date.now() / 1000);
-  const row = db().prepare(
-    `SELECT 1 FROM permits WHERE user_id=? AND expires_at>? LIMIT 1`
-  ).get(userId, now);
-  return !!row;
-}
-
-function addPermit({ userId, login, ttlSec, grantedBy }) {
-  const now = Math.floor(Date.now() / 1000);
-  const exp = now + Math.max(1, Number(ttlSec || 180));
-  db().prepare(
-    `INSERT INTO permits(user_id, login, expires_at, granted_by) VALUES(?,?,?,?)`
-  ).run(String(userId || ''), String(login || '').toLowerCase(), exp, String(grantedBy || ''));
-  return exp;
-}
-
-function logEvent({ type, userId, login, messageId, action, reason }) {
-  db().prepare(
-    `INSERT INTO moderation_events(type,user_id,login,message_id,action,reason) VALUES(?,?,?,?,?,?)`
-  ).run(type, userId || null, login || null, messageId || null, action || null, reason || null);
-}
-
-async function deleteMessage({ helix, getBotToken, channelId, messageId }) {
-  if (!messageId || !BOT_USER_ID) return false;
-  try {
-    const tok = await getBotToken();
-    const q = `broadcaster_id=${encodeURIComponent(channelId)}&moderator_id=${encodeURIComponent(BOT_USER_ID)}&message_id=${encodeURIComponent(messageId)}`;
-    const res = await helix(`/moderation/chat?${q}`, { method: 'DELETE', token: tok });
-    dlog('delete attempt status', res.status);
-    return res.ok;
+    const token = await ctx.getBotToken();
+    const q = new URLSearchParams({
+      broadcaster_id: ctx.broadcasterUserId,
+      moderator_id:   ctx.botUserId,
+      message_id:     ev.messageId
+    }).toString();
+    const res = await ctx.helix(`/moderation/chat?${q}`, {
+      method: 'DELETE',
+      token
+    });
+    if (res.status === 204) {
+      if (process.env.LINKGUARD_DEBUG) console.log('[LG] deletemsg 204 ok');
+      return true;
+    }
+    const txt = await res.text().catch(() => '');
+    console.warn('[LG] deletemsg', res.status, txt);
   } catch (e) {
-    dlog('delete error', e.message || e);
-    return false;
+    console.warn('[LG] deletemsg err', e.message || e);
   }
+  return false;
 }
 
-/**
- * checkAndHandle(ev, ctx, cfg)
- *  - Returns true if Link Guard acted (deleted/warned), false to let command router continue.
- */
-async function checkAndHandle(ev, ctx, cfg) {
-  if (!cfg || !cfg.enabled) return false;
-  if (!ev || !ev.text) return false;
+module.exports = {
+  async checkAndHandle(ev, ctx, cfg) {
+    if (!cfg || cfg.enabled === false) return false;
 
-  // never police the bot itself
-  if (String(ev.userId || '') === BOT_USER_ID) return false;
+    if (process.env.LINKGUARD_DEBUG) {
+      try { console.log('[LG] routeChat start', { text: ev?.text, user: ev?.userLogin }); } catch {}
+    }
 
-  const links = extractLinks(ev.text);
-  dlog('links:', links);
-  if (!links.length) return false;
+    // skip broadcaster/mods completely
+    if (ev?.isBroadcaster || ev?.isMod) {
+      if (process.env.LINKGUARD_DEBUG) console.log('[LG] skip privileged', ev.userLogin);
+      return false;
+    }
 
-  // role bypass
-  const allowedRoles = (cfg.allowedRoles || []).map(s => String(s).toLowerCase());
-  const roleOK =
-    (ev.isBroadcaster && (allowedRoles.includes('owner') || allowedRoles.includes('broadcaster'))) ||
-    (ev.isMod && allowedRoles.includes('mod'));
-  if (roleOK) { dlog('role bypass'); return false; }
+    const text = String(ev?.text || '');
+    if (!text) return false;
 
-  // whitelist
-  const white = (cfg.whitelistHosts || []).map(s => s.toLowerCase());
-  const allWhite = links.every(u => hostAllowed(u, white));
-  if (allWhite) { dlog('whitelisted'); return false; }
+    // Extract/normalize host
+    const rawHost = extractHost(text);
+    if (!rawHost) return false;
 
-  // temporary permit
-  if (hasPermit(ev.userId)) { dlog('user permitted'); return false; }
+    // permit bypass
+    if (store.isPermitted(ev.channelId, ev.userLogin)) {
+      if (process.env.LINKGUARD_DEBUG) console.log('[LG] permit bypass', ev.userLogin);
+      return false;
+    }
 
-  // moderation: delete & warn
-  const deleted = await deleteMessage({
-    helix: ctx.helix,
-    getBotToken: ctx.getBotToken,
-    channelId: ev.channelId,
-    messageId: ev.messageId
-  });
+    // Whitelist
+    const wl = (cfg.whitelistHosts || []).map(h => String(h || '').toLowerCase());
+    const host = rawHost.replace(/^www\./, '');
+    const isWhitelisted = wl.some(w => host === w || host.endsWith('.' + w));
+    if (isWhitelisted) {
+      if (process.env.LINKGUARD_DEBUG) console.log('[LG] whitelisted host', host);
+      return false;
+    }
 
-  const warn = String(cfg.warnTemplate || '@{login} links aren’t allowed. Ask a mod for !permit.');
-  const login = ev.userLogin || ev.userName || 'friend';
-  const msg = warn.replace(/@\{login\}/g, `@${login}`).replace(/\{login\}/g, login);
+    // At this point we’re going to warn + delete
+    if (process.env.LINKGUARD_DEBUG) console.log('[LG] flag', { from: ev.userLogin, host: host, text });
 
-  try { await ctx.reply(msg, ev.messageId); } catch {}
+    // Prefer threaded reply to avoid "cannot be replied to" after deletion.
+    let warnMsg = String(cfg.warnTemplate || '@{login} links aren’t allowed. Ask a mod for !permit.')
+      .replace(/{login}/g, ev.userLogin);
 
-  logEvent({
-    type: 'link_guard',
-    userId: ev.userId,
-    login: ev.userLogin,
-    messageId: ev.messageId,
-    action: deleted ? 'delete' : 'warn-only',
-    reason: 'link'
-  });
+    // When replying in thread, the UI already indicates who we replied to.
+    // If the template starts with "@login", strip it to avoid a doubled mention.
+    warnMsg = warnMsg.replace(new RegExp(`^@${ev.userLogin}\\b\\s*`, 'i'), '');
 
-  return true;
-}
+    // Try to send the threaded warning first
+    let warned = false;
+    try {
+      await ctx.reply(warnMsg, ev.messageId);
+      warned = true;
+      if (process.env.LINKGUARD_DEBUG) console.log('[LG] warn sent', { to: ev.userLogin, threaded: true });
+    } catch {
+      // Fallback: non-threaded message
+      try {
+        await ctx.say(`@${ev.userLogin} ${warnMsg}`);
+        warned = true;
+        if (process.env.LINKGUARD_DEBUG) console.log('[LG] warn sent', { to: ev.userLogin, threaded: false });
+      } catch {}
+    }
 
-module.exports = { checkAndHandle, addPermit, hasPermit };
+    // Delete the offending message (best-effort)
+    await deleteMessage(ev, ctx);
+
+    return warned; // acted
+  }
+};

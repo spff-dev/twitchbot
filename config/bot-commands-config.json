@@ -300,7 +300,9 @@
         "usage": "Usage: !permit <user> [seconds]",
         "notFound": "Unknown user: {target}",
         "done": "Permitted {target} for {ttl}s.",
-        "error": "permit error: {reason}"
+        "error": "permit error: {reason}",
+        "granted": "Permitted {login} for {seconds}s.",
+        "notMod": "Mods only."
       }
     }
   }
