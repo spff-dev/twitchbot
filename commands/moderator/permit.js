@@ -1,132 +1,90 @@
 'use strict';
 
-/**
- * Manifest command: !permit <user> [ttl]
- * Grants a temporary link-permit so linkguard will not delete that user's URLs.
- *
- * Router calls: entry.manifest.execute(ctx, args, meta)
- *  - ctx: { say(), reply(), user, channel, isMod, isBroadcaster, generalCfg() }
- *  - args: array of tokens after the command (or string); we handle both
- *  - meta: the merged command config from bot-commands-config.json
- */
+const linkguard = require('../../src/moderation/linkguard');
 
-const store = require('../../src/moderation/permit-store');
-
-function toLogin(raw) {
-  let s = String(raw || '').trim();
-  if (!s) return '';
-  s = s.replace(/^@+/, '');
-  return s.toLowerCase();
-}
-
-function parseTTL(raw, fallbackSec) {
-  if (!raw) return fallbackSec;
-  const s = String(raw).trim().toLowerCase();
-  const m = s.match(/^(\d+)\s*([smhd]?)$/);
-  if (!m) return fallbackSec;
-  const n = Number(m[1] || '0');
-  const unit = m[2] || 's';
-  if (!n) return fallbackSec;
-  switch (unit) {
-    case 's': return n;
-    case 'm': return n * 60;
-    case 'h': return n * 3600;
-    case 'd': return n * 86400;
-    default:  return fallbackSec;
-  }
+function parseTtlSec(raw, fallback) {
+  const s = String(raw || '').trim();
+  if (!s) return fallback;
+  const m = s.match(/^(\d+)\s*(s|m|h)?$/i);
+  if (!m) return fallback;
+  const n = parseInt(m[1], 10);
+  const unit = (m[2] || 's').toLowerCase();
+  const mult = unit === 'h' ? 3600 : unit === 'm' ? 60 : 1;
+  return Math.max(1, Math.min(n * mult, 3600)); // cap at 1h
 }
 
 module.exports = {
   schemaVersion: 3,
-
   manifest: {
     name: 'permit',
-    category: 'moderator',
     kind: 'module',
+    category: 'moderator',
 
-    // Defaults that seed/merge into config/bot-commands-config.json
+    // Defaults the loader merges into config/bot-commands-config.json
     defaults: {
       aliases: [],
-      roles: ['mod', 'owner'],       // router will gate for mods/broadcaster
+      roles: ['mod', 'owner'],
       cooldownSeconds: 0,
       limitPerUser: 0,
       limitPerStream: 0,
-      replyToUser: true,
-      failSilently: true,
-      // Keep response simple and under config control. We return {out}.
-      response: '{out}',
+      replyToUser: false,
+      // Router will render this using returned vars
+      response: '✅ @{target} you have a permit for {ttl}s to post a link.',
       templates: {
-        usage: 'Usage: !permit <user> [ttl]',
-        ok: 'Permitted {target} for {seconds}s.',
+        usage: 'Usage: !permit <user> [seconds]',
+        ok:    '✅ @{target} you have a permit for {ttl}s to post a link.',
         noPerms: 'Mods only.',
-        invalid: 'Usage: !permit <user> [ttl]'
-      }
-    },
-
-    // Used by your loader to compile/validate config shape
-    configSchema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        aliases: { type: 'array', items: { type: 'string' } },
-        roles:   { type: 'array', items: { type: 'string' } },
-        cooldownSeconds: { type: 'integer', minimum: 0 },
-        limitPerUser:    { type: 'integer', minimum: 0 },
-        limitPerStream:  { type: 'integer', minimum: 0 },
-        replyToUser:     { type: 'boolean' },
-        failSilently:    { type: 'boolean' },
-        response:        { type: 'string' },
-        templates: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            usage:    { type: 'string' },
-            ok:       { type: 'string' },
-            noPerms:  { type: 'string' },
-            invalid:  { type: 'string' }
-          }
-        }
+        error: 'Error setting permit.'
       }
     },
 
     /**
-     * Execute the command.
-     * Return tokens for renderer: we always return { out } so "{out}" works by default.
+     * execute(ctx, args, cfg)
+     * - ctx.has: helix, getAppToken, getBroadcasterToken, getBotToken, clientId,
+     *            broadcasterUserId, botUserId, generalCfg(), commandMeta(), user/channel info,
+     *            isMod, isBroadcaster, say(), reply()
+     * - args: array of tokens after the command name
+     * - cfg:  merged command config (cfg.templates, cfg.response, etc)
      */
-    async execute(ctx, args, meta) {
-      const isPriv = !!(ctx.isMod || ctx.isBroadcaster);
-      if (!isPriv) {
-        const out = (meta.templates && meta.templates.noPerms) || 'Mods only.';
-        return { out };
+    async execute(ctx, args, cfg) {
+      const T = (cfg && cfg.templates) || {};
+      // Only mods/owner can grant permits (router also enforces roles)
+      if (!(ctx.isMod || ctx.isBroadcaster)) {
+        return { vars: { out: String(T.noPerms || 'Mods only.') }, reply: true, suppress: false };
       }
 
-      const parts = Array.isArray(args)
-        ? args
-        : String(args || '').trim().split(/\s+/).filter(Boolean);
-
-      const targetLogin = toLogin(parts && parts[0]);
-      if (!targetLogin) {
-        const out = (meta.templates && meta.templates.usage) || 'Usage: !permit <user> [ttl]';
-        return { out };
+      const targetRaw = (args[0] || '').trim().replace(/^@/, '');
+      if (!targetRaw) {
+        return { vars: { out: String(T.usage || 'Usage: !permit <user> [seconds]') }, reply: true };
       }
+      const target = targetRaw.toLowerCase();
 
-      // TTL: arg[1] or fallback to general.cfg.moderation.linkGuard.permitTtlSec (default 180)
-      const general = (typeof ctx.generalCfg === 'function') ? (ctx.generalCfg() || {}) : {};
-      const fallbackSec = Number(
-        general?.moderation?.linkGuard?.permitTtlSec ?? 180
-      ) || 180;
+      // Default TTL from general config, fallback 120s
+      const g = (ctx.generalCfg && ctx.generalCfg()) || {};
+      const lgCfg = (g.moderation && g.moderation.linkGuard) || {};
+      const defTtl = Number(lgCfg.permitTtlSec || 120);
 
-      const seconds = parseTTL(parts[1], fallbackSec);
+      const ttlSec = parseTtlSec(args[1], defTtl);
 
-      // Channel-scoped grant
-      const channelId = ctx?.channel?.id || '';
-      store.grant(channelId, targetLogin, seconds);
+      try {
+        // Tell linkguard to allow this user for ttlSec
+        if (typeof linkguard.setPermit === 'function') {
+          linkguard.setPermit(target, ttlSec);
+        }
 
-      const out = ((meta.templates && meta.templates.ok) || 'Permitted {target} for {seconds}s.')
-        .replace('{target}', targetLogin)
-        .replace('{seconds}', String(seconds));
+        // Return tokens router will inject into cfg.response
+        const out = String(T.ok || cfg.response || '✅ @{target} you have a permit for {ttl}s to post a link.')
+          .replace('{ttl}', String(ttlSec))
+          .replace('{target}', target);
 
-      return { out };
+        return {
+          vars: { ttl: ttlSec, target, out },
+          reply: false // send as normal chat (not threaded)
+        };
+      } catch (e) {
+        const out = String(T.error || 'Error setting permit.');
+        return { vars: { out }, reply: true };
+      }
     }
   }
 };

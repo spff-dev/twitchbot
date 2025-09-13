@@ -286,24 +286,28 @@
     "permit": {
       "aliases": [],
       "roles": [
-        "everyone"
+        "mod",
+        "owner"
       ],
       "cooldownSeconds": 0,
       "limitPerUser": 0,
       "limitPerStream": 0,
-      "replyToUser": true,
-      "failSilently": true,
-      "category": "dynamic",
-      "kind": "module",
-      "response": "{out}",
+      "replyToUser": false,
+      "response": "✅ @{target} you have a permit for {ttl}s to post a link.",
       "templates": {
         "usage": "Usage: !permit <user> [seconds]",
+        "ok": "Permitted {target} for {seconds}s.",
+        "noPerms": "Mods only.",
+        "error": "permit error: {reason}",
+        "invalid": "Usage: !permit <user> [ttl]",
         "notFound": "Unknown user: {target}",
         "done": "Permitted {target} for {ttl}s.",
-        "error": "permit error: {reason}",
         "granted": "Permitted {login} for {seconds}s.",
         "notMod": "Mods only."
-      }
+      },
+      "failSilently": true,
+      "category": "dynamic",
+      "kind": "module"
     }
   }
 }
