@@ -8,7 +8,8 @@ module.exports = {
       autorestart: true,
       max_restarts: 10,
       env: {
-        NODE_ENV: "production"
+        NODE_ENV: "production",
+        LINKGUARD_DEBUG: "0"
       }
     }
   ]

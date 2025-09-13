@@ -11,10 +11,10 @@ const linkguard = require('./src/moderation/linkguard');
  * - Commands (JS):    commands/**.js export a manifest via defineCommand()
  *
  * Chat path:
- *   Twitch -> (webhook: scripts/twitch-webhook.js) -> POST /_intake/chat -> router -> sendChat (Helix)
+ * Twitch -> (webhook: scripts/twitch-webhook.js) -> POST /_intake/chat -> router -> sendChat (Helix)
  *
  * EventSub (subs/follows/bits/raid):
- *   startEventSub() using proper user tokens
+ * startEventSub() using proper user tokens
  */
 
 require('dotenv').config();
@@ -149,10 +149,6 @@ async function sendChat(message, opts) {
 
 // === [LINKGUARD ROUTER] ===
 async function routeChat(ev) {
-  if (process.env.LINKGUARD_DEBUG && process.env.LINKGUARD_DEBUG !== '0') {
-    try { console.log('[LG] routeChat start', { text: ev && ev.text, user: ev && ev.userLogin }); } catch {}
-  }
-
   const ctx = {
     helix,
     getAppToken,

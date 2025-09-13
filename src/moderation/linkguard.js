@@ -5,7 +5,7 @@
  * Respects permits from permit-store. Whitelists configured hosts.
  *
  * Exported API expected by bot.js:
- *   checkAndHandle(ev, ctx, cfg) -> true if it acted (warned/deleted), else false
+ * checkAndHandle(ev, ctx, cfg) -> true if it acted (warned/deleted), else false
  *
  * ev:  { text, userLogin, userId, channelId, messageId, isMod, isBroadcaster }
  * ctx: { helix, getBotToken, clientId, broadcasterUserId, botUserId, say(text), reply(text, parentId), generalCfg() }
@@ -40,7 +40,6 @@ async function deleteMessage(ev, ctx) {
       token
     });
     if (res.status === 204) {
-      if (process.env.LINKGUARD_DEBUG) console.log('[LG] deletemsg 204 ok');
       return true;
     }
     const txt = await res.text().catch(() => '');
@@ -55,13 +54,8 @@ module.exports = {
   async checkAndHandle(ev, ctx, cfg) {
     if (!cfg || cfg.enabled === false) return false;
 
-    if (process.env.LINKGUARD_DEBUG) {
-      try { console.log('[LG] routeChat start', { text: ev?.text, user: ev?.userLogin }); } catch {}
-    }
-
     // skip broadcaster/mods completely
     if (ev?.isBroadcaster || ev?.isMod) {
-      if (process.env.LINKGUARD_DEBUG) console.log('[LG] skip privileged', ev.userLogin);
       return false;
     }
 
@@ -74,7 +68,6 @@ module.exports = {
 
     // permit bypass
     if (store.isPermitted(ev.channelId, ev.userLogin)) {
-      if (process.env.LINKGUARD_DEBUG) console.log('[LG] permit bypass', ev.userLogin);
       return false;
     }
 
@@ -83,13 +76,10 @@ module.exports = {
     const host = rawHost.replace(/^www\./, '');
     const isWhitelisted = wl.some(w => host === w || host.endsWith('.' + w));
     if (isWhitelisted) {
-      if (process.env.LINKGUARD_DEBUG) console.log('[LG] whitelisted host', host);
       return false;
     }
 
     // At this point we’re going to warn + delete
-    if (process.env.LINKGUARD_DEBUG) console.log('[LG] flag', { from: ev.userLogin, host: host, text });
-
     // Prefer threaded reply to avoid "cannot be replied to" after deletion.
     let warnMsg = String(cfg.warnTemplate || '@{login} links aren’t allowed. Ask a mod for !permit.')
       .replace(/{login}/g, ev.userLogin);
@@ -103,13 +93,11 @@ module.exports = {
     try {
       await ctx.reply(warnMsg, ev.messageId);
       warned = true;
-      if (process.env.LINKGUARD_DEBUG) console.log('[LG] warn sent', { to: ev.userLogin, threaded: true });
     } catch {
       // Fallback: non-threaded message
       try {
         await ctx.say(`@${ev.userLogin} ${warnMsg}`);
         warned = true;
-        if (process.env.LINKGUARD_DEBUG) console.log('[LG] warn sent', { to: ev.userLogin, threaded: false });
       } catch {}
     }
 
